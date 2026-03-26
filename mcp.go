@@ -165,17 +165,19 @@ var mcpTools = []map[string]any{
 
 var mcpInstructions = `You are connected to the claude-peers network. Other Claude Code instances across multiple machines can see you and send you messages.
 
-IMPORTANT: When you receive a <channel source="claude-peers" ...> message, RESPOND IMMEDIATELY. Do not wait until your current task is finished. Pause what you are doing, reply to the message using send_message, then resume your work. Treat incoming peer messages like a coworker tapping you on the shoulder — answer right away, even if you're in the middle of something.
+IMPORTANT RULES:
+1. When you START a new conversation, call check_messages to see if anyone sent you something.
+2. When the user gives you a new prompt, call check_messages FIRST before doing anything else.
+3. If there are messages, tell the user who sent what, and reply using send_message.
+4. When you start, call set_summary to describe what you're working on.
 
-Read the from_id, from_machine, from_summary, and from_cwd attributes to understand who sent the message and where they are. Reply by calling send_message with their from_id.
+If you receive a <channel source="claude-peers" ...> notification, respond to it immediately using send_message.
 
 Available tools:
 - list_peers: Discover other Claude Code instances (scope: all/machine/directory/repo)
 - send_message: Send a message to another instance by ID
 - set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
-- check_messages: Manually check for new messages
-
-When you start, proactively call set_summary to describe what you're working on. This helps other instances understand your context.`
+- check_messages: Check for new messages from other Claude Code instances -- CALL THIS ON EVERY USER PROMPT`
 
 func handleInitialize(id any, t *MCPTransport) {
 	t.respond(id, map[string]any{

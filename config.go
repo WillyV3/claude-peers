@@ -84,7 +84,7 @@ func defaultConfig() Config {
 		Listen:       "127.0.0.1:7899",
 		MachineName:  hostname,
 		DBPath:       defaultDBPath(),
-		StaleTimeout: 45,
+		StaleTimeout: 300,
 	}
 }
 

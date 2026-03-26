@@ -274,6 +274,11 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 		}
 		json.Unmarshal(call.Arguments, &args)
 
+		if args.ToID == "" {
+			toolError(id, t, "to_id is required")
+			return
+		}
+
 		var resp SendMessageResponse
 		err := brokerFetch("/send-message", SendMessageRequest{
 			FromID: myID,
@@ -320,7 +325,23 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "%d new message(s):\n\n", len(resp.Messages))
 		for _, m := range resp.Messages {
-			fmt.Fprintf(&sb, "From %s (%s):\n%s\n\n---\n\n", m.FromID, m.SentAt, m.Text)
+			// Look up sender info
+			fromMachine, fromSummary := "", ""
+			var peers []Peer
+			if err := brokerFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers); err == nil {
+				for _, p := range peers {
+					if p.ID == m.FromID {
+						fromMachine = p.Machine
+						fromSummary = p.Summary
+						break
+					}
+				}
+			}
+			fmt.Fprintf(&sb, "From %s on %s", m.FromID, fromMachine)
+			if fromSummary != "" {
+				fmt.Fprintf(&sb, " (%s)", fromSummary)
+			}
+			fmt.Fprintf(&sb, " at %s:\n%s\n\n---\n\n", m.SentAt, m.Text)
 		}
 		toolResult(id, t, "%s", sb.String())
 

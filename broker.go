@@ -232,6 +232,34 @@ func (b *Broker) pollMessages(req PollMessagesRequest) PollMessagesResponse {
 	return PollMessagesResponse{Messages: msgs}
 }
 
+// peekMessages returns undelivered messages without marking them delivered.
+// Used by the background poll loop -- messages stay available for check_messages.
+func (b *Broker) peekMessages(req PollMessagesRequest) PollMessagesResponse {
+	rows, err := b.db.Query(
+		"SELECT id, from_id, to_id, text, sent_at FROM messages WHERE to_id = ? AND delivered = 0 ORDER BY sent_at ASC",
+		req.ID,
+	)
+	if err != nil {
+		return PollMessagesResponse{Messages: []Message{}}
+	}
+	defer rows.Close()
+
+	var msgs []Message
+	for rows.Next() {
+		var m Message
+		rows.Scan(&m.ID, &m.FromID, &m.ToID, &m.Text, &m.SentAt)
+		msgs = append(msgs, m)
+	}
+	if msgs == nil {
+		msgs = []Message{}
+	}
+	return PollMessagesResponse{Messages: msgs}
+}
+
+func (b *Broker) ackMessage(messageID int) {
+	b.db.Exec("UPDATE messages SET delivered = 1 WHERE id = ?", messageID)
+}
+
 func (b *Broker) unregister(req UnregisterRequest) {
 	b.emitEvent("peer_left", req.ID, "", "")
 	b.db.Exec("DELETE FROM peers WHERE id = ?", req.ID)
@@ -336,6 +364,27 @@ func runBroker(ctx context.Context) error {
 			return
 		}
 		writeJSON(w, b.pollMessages(req))
+	})
+
+	mux.HandleFunc("POST /peek-messages", func(w http.ResponseWriter, r *http.Request) {
+		req, err := decodeBody[PollMessagesRequest](r)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		writeJSON(w, b.peekMessages(req))
+	})
+
+	mux.HandleFunc("POST /ack-message", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			MessageID int `json:"message_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		b.ackMessage(req.MessageID)
+		writeJSON(w, map[string]bool{"ok": true})
 	})
 
 	mux.HandleFunc("POST /unregister", func(w http.ResponseWriter, r *http.Request) {
