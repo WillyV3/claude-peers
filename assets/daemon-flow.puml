@@ -1,0 +1,39 @@
+@startuml daemon-flow
+skinparam backgroundColor white
+skinparam defaultFontName monospaced
+skinparam shadowing false
+
+title Daemon Event Flow
+
+actor "You" as user
+participant "Claude Code\n(any machine)" as cc
+participant "Broker\n:7899" as broker
+queue "NATS JetStream\n:4222" as nats
+participant "Supervisor" as super
+participant "Agent\n(vinayprograms)" as agent
+participant "LiteLLM\n:4000" as llm
+
+user -> cc : work on code
+cc -> broker : register + set_summary
+broker -> nats : fleet.peer.joined\nfleet.summary
+
+nats -> super : trigger daemon\n(interval or event)
+super -> agent : spawn workflow\n(Agentfile + policy)
+agent -> llm : Claude Sonnet/Opus\nor Qwen 9B
+llm --> agent : response
+agent -> agent : execute tools\n(bash, read, write)
+agent --> super : result + status
+
+super -> nats : fleet.daemon.complete
+nats -> broker : persist event
+
+cc -> broker : poll messages
+broker --> cc : fleet briefing\nvia dream-watch
+
+note over super
+  Policy enforced:
+  - tool allowlist
+  - max runtime 5min
+  - max 50 tool calls
+end note
+@enduml

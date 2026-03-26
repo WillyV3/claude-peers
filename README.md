@@ -100,6 +100,8 @@ claude-peers kill-broker         Stop the broker
 
 ## Daemons
 
+![Daemon Event Flow](assets/daemon-flow.png)
+
 Daemons are AI background processes defined as directories:
 
 ```
