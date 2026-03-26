@@ -3,37 +3,69 @@ skinparam backgroundColor white
 skinparam defaultFontName monospaced
 skinparam shadowing false
 
-title Daemon Event Flow
+title Peer Messaging + Daemon Event Flow
 
-actor "You" as user
-participant "Claude Code\n(any machine)" as cc
+actor "Developer" as dev
+participant "Claude A\n(omarchy)" as ccA
+participant "MCP Server A" as mcpA
 participant "Broker\n:7899" as broker
-queue "NATS JetStream\n:4222" as nats
+queue "NATS\n:4222" as nats
+participant "MCP Server B" as mcpB
+participant "Claude B\n(thinkbook)" as ccB
 participant "Supervisor" as super
-participant "Agent\n(vinayprograms)" as agent
+participant "Agent\n(daemon)" as agent
 participant "LiteLLM\n:4000" as llm
 
-user -> cc : work on code
-cc -> broker : register + set_summary
-broker -> nats : fleet.peer.joined\nfleet.summary
+== Real-Time Peer Messaging ==
 
-nats -> super : trigger daemon\n(interval or event)
-super -> agent : spawn workflow\n(Agentfile + policy)
-agent -> llm : Claude Sonnet/Opus\nor Qwen 9B
-llm --> agent : response
-agent -> agent : execute tools\n(bash, read, write)
-agent --> super : result + status
+dev -> ccA : "send message to peer B"
+ccA -> mcpA : tools/call: send_message
+mcpA -> broker : POST /send-message
+broker -> nats : fleet.message
 
+mcpB -> broker : POST /poll-messages (1s loop)
+broker --> mcpB : message payload
+mcpB -> ccB : channel notification\n(--dangerously-load-development-channels)
+
+note over ccB
+  Message appears live
+  in Claude B's session.
+  No user action needed.
+end note
+
+ccB -> mcpB : tools/call: send_message (reply)
+mcpB -> broker : POST /send-message
+mcpA -> broker : POST /poll-messages
+broker --> mcpA : reply payload
+mcpA -> ccA : channel notification
+
+== Autonomous Daemon Execution ==
+
+nats -> super : fleet event or\ninterval trigger
+super -> agent : spawn Agentfile\n+ policy.toml
+agent -> llm : Claude Sonnet\nor Qwen 9B
+llm --> agent : LLM response
+agent -> agent : bash / read / write
+agent --> super : result
 super -> nats : fleet.daemon.complete
-nats -> broker : persist event
 
-cc -> broker : poll messages
-broker --> cc : fleet briefing\nvia dream-watch
-
-note over super
+note over agent
   Policy enforced:
-  - tool allowlist
-  - max runtime 5min
-  - max 50 tool calls
+  tool allowlist,
+  max 5min runtime,
+  max 50 tool calls
+end note
+
+== Fleet Memory ==
+
+nats -> broker : all events persisted
+broker -> broker : dream-watch consolidates
+broker --> mcpA : fleet-activity.md\n(Claude memory path)
+broker --> mcpB : fleet-activity.md
+
+note over broker
+  New sessions on any
+  machine read the fleet
+  briefing on startup.
 end note
 @enduml

@@ -3,49 +3,77 @@ skinparam backgroundColor white
 skinparam defaultFontName monospaced
 skinparam shadowing false
 
-title claude-peers: Cross-Machine AI Fleet Architecture
+title claude-peers: Fleet Architecture
 
-node "ubuntu-homelab (always-on server)" as homelab {
+node "ubuntu-homelab (broker machine)" as homelab {
   [Broker :7899] as broker
   database "SQLite" as db
   queue "NATS JetStream\n:4222" as nats
-  [Supervisor] as super
   [Dream Watch] as dream
+  [Supervisor] as super
 
-  broker --> db : persist
-  broker --> nats : publish
-  super --> nats : consume triggers
-  dream --> nats : subscribe fleet.>
+  broker -down-> db : persist
+  broker -down-> nats : publish events
+  dream -down-> nats : subscribe fleet.>
+  super -down-> nats : trigger daemons
 }
 
 cloud "LiteLLM :4000" as litellm {
-  [Claude Opus/Sonnet\n(Vertex AI)] as claude_api
-  [Qwen 9B\n(sonia's macbook)] as qwen
+  [Claude Opus/Sonnet] as claude_models
+  [Qwen 9B local] as qwen
 }
 
-super ..> litellm : daemon\nworkflows
+super ..> litellm : daemon workflows
 
 node "omarchy" as om {
-  [Claude Code + MCP] as cc1
+  [Claude Code] as cc1
+  [MCP Server] as mcp1
+  cc1 -down-> mcp1 : stdio
 }
 
 node "macbook1" as mb {
-  [Claude Code + MCP] as cc2
+  [Claude Code] as cc2
+  [MCP Server] as mcp2
+  cc2 -down-> mcp2 : stdio
 }
 
 node "thinkbook" as tb {
-  [Claude Code + MCP] as cc3
+  [Claude Code] as cc3
+  [MCP Server] as mcp3
+  cc3 -down-> mcp3 : stdio
 }
 
 node "raspdeck" as rp {
-  [Gridwatch Dashboard] as gw
-  [Claude Code + MCP] as cc4
+  [Claude Code] as cc4
+  [MCP Server] as mcp4
+  [Gridwatch\nDashboard] as gw
+  cc4 -down-> mcp4 : stdio
 }
 
-cc1 --> broker : Tailscale
-cc2 --> broker : Tailscale
-cc3 --> broker : Tailscale
-cc4 --> broker : Tailscale
-gw --> broker : poll stats
-gw ..> nats : events feed
+mcp1 --> broker : register / heartbeat\nsend + poll messages
+mcp2 --> broker : Tailscale
+mcp3 --> broker : Tailscale
+mcp4 --> broker : Tailscale
+gw --> broker : poll peers + events
+
+note right of mcp1
+  --dangerously-load-development-channels
+  Required for live message delivery.
+  Messages arrive via channel notification
+  directly into Claude's session.
+end note
+
+note bottom of dream
+  Writes fleet-activity.md
+  to Claude memory path.
+  Every new session knows
+  what the fleet was doing.
+end note
+
+note bottom of super
+  4 daemons: fleet-scout,
+  pr-helper, llm-watchdog,
+  fleet-memory. Policy-
+  constrained, auto-triggered.
+end note
 @enduml
