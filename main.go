@@ -50,6 +50,10 @@ func main() {
 			os.Exit(1)
 		}
 		cliSend(os.Args[2], strings.Join(os.Args[3:], " "))
+	case "dream":
+		cliDream()
+	case "dream-watch":
+		cliDreamWatch()
 	case "kill-broker":
 		cliKillBroker()
 	default:
@@ -69,6 +73,8 @@ Usage:
   claude-peers status              Show broker status and all peers
   claude-peers peers               List all peers
   claude-peers send <id> <msg>     Send a message to a peer
+  claude-peers dream               Snapshot fleet state to Claude memory
+  claude-peers dream-watch         Watch fleet via NATS and keep memory fresh
   claude-peers kill-broker         Stop the broker daemon
 
 Setup:

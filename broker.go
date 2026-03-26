@@ -23,8 +23,9 @@ func generatePeerID() string {
 }
 
 type Broker struct {
-	db *sql.DB
-	mu sync.RWMutex
+	db   *sql.DB
+	nats *NATSPublisher
+	mu   sync.RWMutex
 }
 
 func newBroker() (*Broker, error) {
@@ -68,7 +69,7 @@ func newBroker() (*Broker, error) {
 		db.Exec(stmt) // Ignore errors from ALTER (column already exists).
 	}
 
-	b := &Broker{db: db}
+	b := &Broker{db: db, nats: newNATSPublisher()}
 	b.cleanStalePeers()
 	return b, nil
 }
@@ -130,6 +131,10 @@ func (b *Broker) register(req RegisterRequest) RegisterResponse {
 		id, req.PID, req.Machine, req.CWD, req.GitRoot, req.TTY, req.Summary, now, now,
 	)
 	b.emitEvent("peer_joined", id, req.Machine, req.Summary)
+	b.nats.publish("fleet.peer.joined", FleetEvent{
+		Type: "peer_joined", PeerID: id, Machine: req.Machine,
+		Summary: req.Summary, CWD: req.CWD,
+	})
 	return RegisterResponse{ID: id}
 }
 
@@ -140,6 +145,9 @@ func (b *Broker) heartbeat(req HeartbeatRequest) {
 func (b *Broker) setSummary(req SetSummaryRequest) {
 	b.db.Exec("UPDATE peers SET summary = ? WHERE id = ?", req.Summary, req.ID)
 	b.emitEvent("summary_changed", req.ID, "", req.Summary)
+	b.nats.publish("fleet.summary", FleetEvent{
+		Type: "summary_changed", PeerID: req.ID, Summary: req.Summary,
+	})
 }
 
 func (b *Broker) listPeers(req ListPeersRequest) []Peer {
@@ -202,6 +210,9 @@ func (b *Broker) sendMessage(req SendMessageRequest) SendMessageResponse {
 		req.FromID, req.ToID, req.Text, nowISO(),
 	)
 	b.emitEvent("message_sent", req.FromID, "", req.ToID)
+	b.nats.publish("fleet.message", FleetEvent{
+		Type: "message_sent", PeerID: req.FromID, Data: req.ToID,
+	})
 	return SendMessageResponse{OK: true}
 }
 
@@ -262,6 +273,9 @@ func (b *Broker) ackMessage(messageID int) {
 
 func (b *Broker) unregister(req UnregisterRequest) {
 	b.emitEvent("peer_left", req.ID, "", "")
+	b.nats.publish("fleet.peer.left", FleetEvent{
+		Type: "peer_left", PeerID: req.ID,
+	})
 	b.db.Exec("DELETE FROM peers WHERE id = ?", req.ID)
 	b.db.Exec("DELETE FROM messages WHERE to_id = ? AND delivered = 0", req.ID)
 }
