@@ -1,0 +1,28 @@
+# Fleet Scout Daemon
+# Monitors fleet health and reports anomalies via NATS
+# Runs on ubuntu-homelab, checks all machines
+
+NAME fleet-scout
+
+INPUT broker_url DEFAULT "http://100.109.211.128:7899"
+INPUT nats_url DEFAULT "nats://100.109.211.128:4222"
+
+AGENT scout """You are a fleet health scout. Your job is to check the health
+of all machines and services in the fleet and report anomalies.
+
+You have access to bash. Use curl to check endpoints:
+- Broker: $broker_url/health
+- Broker peers: $broker_url/list-peers (POST with {"scope":"all","cwd":"/"})
+- Broker events: $broker_url/events?limit=20
+- LLM server: http://100.75.170.108:8080/health
+- LLM metrics: http://100.75.170.108:8080/metrics
+
+Report format:
+1. Fleet status summary (how many machines/peers online)
+2. Any anomalies (machines offline, peers stale, LLM errors)
+3. Recent notable events
+
+Be concise. Output a markdown summary."""
+
+GOAL check_fleet "Check the health of all fleet services and report status"
+RUN main USING check_fleet

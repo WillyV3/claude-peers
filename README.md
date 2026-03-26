@@ -1,234 +1,190 @@
 # claude-peers
 
-Peer discovery and messaging for Claude Code -- across machines, over any network. Single Go binary, zero runtime dependencies.
+Cross-machine peer discovery, messaging, and AI daemons for Claude Code. Single Go binary, runs on anything.
 
-Run Claude Code on 5 machines across your homelab. Every instance discovers every other instance, sees what they're working on, and can send messages that arrive in real time.
+![Architecture](assets/architecture.png)
 
-```
-  omarchy (pts/9)                    thinkbook (pts/1)
-  ┌───────────────────────┐          ┌──────────────────────┐
-  │ Claude A              │          │ Claude B             │
-  │ "send a message to    │  ──────> │                      │
-  │  peer xyz: what files │  Tailscale│ <channel> arrives   │
-  │  are you editing?"    │  <────── │  instantly, Claude B │
-  │                       │          │  responds            │
-  └───────────────────────┘          └──────────────────────┘
-```
+Run Claude Code on every machine in your fleet. Every instance discovers every other instance, sees what they're working on, and sends messages that arrive in real time. AI daemons run autonomously in the background, maintaining your infrastructure without human prompting.
 
 ## Quick start
 
-### Single machine (localhost)
+### Single machine
 
 ```bash
-# Install
 go install github.com/WillyV3/claude-peers@latest
-
-# Register MCP server
 claude mcp add -s user claude-peers -- claude-peers server
-
-# Launch Claude with channel support
 claude --dangerously-load-development-channels server:claude-peers
 ```
 
-The broker starts automatically on first launch. Open a second session and try:
-
-> List all peers on this machine
+Broker starts automatically. Open a second session and ask Claude to list peers.
 
 ### Cross-machine (Tailscale / LAN)
 
-Pick one always-on machine as the broker (e.g. your server):
-
 ```bash
-# On the broker machine:
+# Broker machine (always-on server):
 claude-peers init broker
-claude-peers broker    # or use systemd (see below)
+claude-peers broker
 
-# On every other machine:
+# Every other machine:
 claude-peers init client http://<broker-ip>:7899
 ```
 
-That's it. Every Claude session on every machine registers with the central broker.
+### Channel notifications
 
-### Channel notifications (required for live messaging)
-
-Claude Code must be launched with the experimental channel flag for messages to arrive in real time:
+Messages arrive in real time via Claude's experimental channel protocol. Launch Claude with:
 
 ```bash
 claude --dangerously-load-development-channels server:claude-peers
 ```
 
-**Recommended:** Create a wrapper script so you don't have to type this every time:
+Add a shell alias so it sticks:
 
 ```bash
-# Move the real binary aside
-mv ~/.local/bin/claude ~/.local/bin/claude-bin
-
-# Create wrapper
-cat > ~/.local/bin/claude << 'EOF'
-#!/usr/bin/env bash
-export DISABLE_AUTOUPDATER=1
-case "${1:-}" in
-  mcp|config|doctor|update) exec ~/.local/bin/claude-bin "$@" ;;
-  *) exec ~/.local/bin/claude-bin --dangerously-load-development-channels server:claude-peers "$@" ;;
-esac
-EOF
-chmod +x ~/.local/bin/claude
+# ~/.bashrc or ~/.zshrc
+alias claude='claude --dangerously-load-development-channels server:claude-peers'
 ```
 
-> **Note:** `DISABLE_AUTOUPDATER=1` prevents Claude's auto-updater from overwriting the wrapper with a symlink. Without it, the wrapper gets replaced on updates and channel support silently stops working.
+## Architecture
 
-## How it works
+**Broker** — HTTP daemon with SQLite. Tracks peers, routes messages, emits events. Runs on your always-on server.
 
-Two components in one binary:
+**MCP Server** — Stdio server spawned by each Claude Code instance. Registers with the broker, polls for messages, pushes them as channel notifications.
 
-- **Broker** -- HTTP daemon with SQLite storage. Tracks registered peers, routes messages, emits events, cleans up stale peers via heartbeat timeout.
-- **MCP Server** -- stdio server spawned by each Claude Code instance. Registers with the broker, polls for inbound messages, pushes them as `notifications/claude/channel` so they appear immediately in the recipient's session.
+**NATS JetStream** — Pub/sub event bus. Broker dual-writes events to SQLite + NATS. Daemons subscribe to fleet events. 24h retention.
 
-### Message flow
+**Dream Watch** — Fleet memory daemon. Subscribes to NATS, consolidates peer activity into a memory file that Claude reads on startup. Shared brain across all machines.
 
-1. Claude A calls `send_message` with peer B's ID
-2. MCP server A posts to broker's `/send-message` endpoint
-3. MCP server B's poll loop (1s interval) picks up the message via `/poll-messages`
-4. Server B writes a `notifications/claude/channel` notification to stdout
-5. Claude B sees the message appear in its session and can respond
+**Supervisor** — Manages AI daemons. Discovers daemon definitions, watches for triggers (NATS events or intervals), spawns agent workflows via [vinayprograms/agent](https://github.com/vinayprograms/agent), enforces policy constraints.
 
-### Cross-machine architecture
-
-```
-  omarchy              ubuntu-homelab (broker)        thinkbook
-┌──────────┐          ┌──────────────────────┐      ┌──────────┐
-│ Claude 1 │──────┐   │  Broker :7899        │  ┌───│ Claude 3 │
-│ Claude 2 │──┐   └──>│  SQLite + events     │<─┘   └──────────┘
-└──────────┘  └──────>│                      │<──── macbook1
-                      └──────────────────────┘       ┌──────────┐
-                         Tailscale mesh              │ Claude 4 │
-                                                     └──────────┘
-```
-
-All communication goes through the central broker over Tailscale (or any network). Peers are identified by machine name + PID. The broker cleans up stale peers that miss heartbeats.
+**Gridwatch** — Fleet health dashboard on a 7" kiosk. Shows machine stats, active Claude instances, LLM server metrics, and event feed.
 
 ## Configuration
 
-Config lives at `~/.config/claude-peers/config.json`. Generated by `claude-peers init`.
+`~/.config/claude-peers/config.json` — generated by `claude-peers init`:
 
 ```json
 {
   "role": "client",
   "broker_url": "http://100.109.211.128:7899",
   "machine_name": "omarchy",
-  "listen": "127.0.0.1:7899",
-  "db_path": "/home/user/.claude-peers.db",
   "stale_timeout": 300
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `role` | `"broker"` or `"client"` |
-| `broker_url` | HTTP endpoint of the broker |
-| `listen` | Bind address (broker only). Use `0.0.0.0:7899` for remote access |
-| `machine_name` | Identifies this machine in peer listings (defaults to hostname) |
-| `db_path` | SQLite database location (broker only) |
-| `stale_timeout` | Seconds without heartbeat before a peer is removed (default: 300) |
-
-Environment variables override config: `CLAUDE_PEERS_BROKER_URL`, `CLAUDE_PEERS_LISTEN`, `CLAUDE_PEERS_MACHINE`, `CLAUDE_PEERS_DB`, `CLAUDE_PEERS_CONFIG`.
-
-## MCP tools
-
-| Tool | What it does |
-|------|-------------|
-| `list_peers` | Discover Claude Code instances (scope: `all`, `machine`, `directory`, `repo`) |
-| `send_message` | Send a message to another instance by peer ID |
-| `set_summary` | Set a description of your current work (visible to other peers) |
-| `check_messages` | Manually poll for new messages (fallback if channel push doesn't work) |
+Environment overrides: `CLAUDE_PEERS_BROKER_URL`, `CLAUDE_PEERS_LISTEN`, `CLAUDE_PEERS_MACHINE`, `CLAUDE_PEERS_DB`.
 
 ## CLI
 
 ```
-claude-peers init <role> [url]   Generate config (broker or client)
+claude-peers init <role> [url]   Set up broker or client
 claude-peers config              Show current config
-claude-peers broker              Start the broker daemon
-claude-peers server              Start MCP stdio server (used by Claude Code)
-claude-peers status              Show broker status and all peers
-claude-peers peers               List all peers
-claude-peers send <id> <msg>     Send a message to a peer
-claude-peers kill-broker         Stop the broker daemon
+claude-peers broker              Start the broker
+claude-peers server              Start MCP server (Claude Code spawns this)
+claude-peers status              Broker status + all peers
+claude-peers peers               List peers
+claude-peers send <id> <msg>     Message a peer
+claude-peers dream               Snapshot fleet state to Claude memory
+claude-peers dream-watch         Continuous fleet memory via NATS
+claude-peers supervisor          Run daemon supervisor
+claude-peers kill-broker         Stop the broker
 ```
+
+## MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `list_peers` | Discover Claude instances (scope: `all`, `machine`, `directory`, `repo`) |
+| `send_message` | Send a message to a peer by ID |
+| `set_summary` | Describe what you're working on |
+| `check_messages` | Manual message check (fallback) |
+
+## Daemons
+
+Daemons are AI background processes defined as directories:
+
+```
+daemons/
+  fleet-scout/
+    daemon.json         # schedule + metadata
+    fleet-scout.agent   # workflow definition (vinayprograms/agent format)
+    agent.toml          # LLM provider config
+    policy.toml         # tool allowlist + execution limits
+```
+
+The supervisor discovers daemons, watches for triggers, and spawns agent workflows through LiteLLM to Claude/Sonnet/Qwen models. Each daemon has policy constraints — tool allowlists, max runtime, max tool calls.
+
+### Fleet Scout daemon (included)
+
+Runs every 15 minutes. Checks all fleet services, Tailscale nodes, system health. Reports anomalies. Found a real production bug on first run.
 
 ## Broker API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Broker status + peer count |
-| `/register` | POST | Register a new peer |
-| `/heartbeat` | POST | Update peer last-seen timestamp |
-| `/unregister` | POST | Remove a peer |
-| `/list-peers` | POST | List peers (filtered by scope) |
-| `/send-message` | POST | Send a message to a peer |
-| `/poll-messages` | POST | Get and mark delivered unread messages |
-| `/peek-messages` | POST | Get unread messages without marking delivered |
-| `/set-summary` | POST | Update peer's work summary |
-| `/events` | GET | Recent broker events (peer joins, messages, etc.) |
+| `/health` | GET | Status + peer count |
+| `/register` | POST | Register peer |
+| `/heartbeat` | POST | Keep-alive |
+| `/list-peers` | POST | List peers by scope |
+| `/send-message` | POST | Send message |
+| `/poll-messages` | POST | Get + mark delivered |
+| `/peek-messages` | POST | Get without marking |
+| `/set-summary` | POST | Update work summary |
+| `/events` | GET | Recent events (1h retention) |
+| `/unregister` | POST | Remove peer |
 
-## Events
+## NATS subjects
 
-The broker tracks events for observability and dashboards:
-
-| Event | When |
-|-------|------|
-| `peer_joined` | A Claude instance registers |
-| `peer_left` | A Claude instance unregisters |
-| `summary_changed` | A peer updates their work summary |
-| `message_sent` | A message is sent between peers |
-
-Events are retained for 1 hour, accessible via `GET /events?limit=50`.
-
-## Systemd (auto-start broker)
-
-```ini
-# ~/.config/systemd/user/claude-peers-broker.service
-[Unit]
-Description=Claude Peers Broker
-After=network-online.target
-
-[Service]
-ExecStart=%h/.local/bin/claude-peers broker
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
+```
+fleet.peer.joined    — Claude instance registered
+fleet.peer.left      — Claude instance left
+fleet.message        — Message sent between peers
+fleet.summary        — Peer updated work summary
 ```
 
+## Systemd services
+
+All services auto-start on boot via systemd user units:
+
 ```bash
-systemctl --user daemon-reload
+# Broker
 systemctl --user enable --now claude-peers-broker
-loginctl enable-linger $USER    # start without login
+
+# NATS
+systemctl --user enable --now nats-server
+
+# Dream watch
+systemctl --user enable --now claude-peers-dream
+
+# Daemon supervisor
+systemctl --user enable --now claude-peers-supervisor
 ```
 
-## Fleet deploy script
+Enable lingering for boot-without-login: `loginctl enable-linger $USER`
 
-`deploy.sh` builds and deploys to all machines in one command:
+## Fleet deployment
 
 ```bash
-cd claude-peers
+# Build all platforms
 go build -o claude-peers .
 GOOS=linux GOARCH=amd64 go build -o claude-peers-linux-amd64 .
 GOOS=linux GOARCH=arm64 go build -o claude-peers-linux-arm64 .
 GOOS=darwin GOARCH=arm64 go build -o claude-peers-darwin-arm64 .
+
+# Deploy everywhere
 ./deploy.sh
 ```
 
 ## Dependencies
 
-- `modernc.org/sqlite` -- pure Go SQLite (no CGO, single binary, cross-compile friendly)
-- Everything else is Go stdlib
+- `modernc.org/sqlite` — pure Go SQLite
+- `github.com/nats-io/nats.go` — NATS client
+- Go stdlib for everything else
+
+Daemon execution uses [vinayprograms/agent](https://github.com/vinayprograms/agent) as an external binary (not imported).
 
 ## Credits
 
-Go rewrite of [claude-peers-mcp](https://github.com/louislva/claude-peers-mcp) by louislva, originally built in TypeScript/Bun.
-
-Extended with cross-machine networking, Tailscale support, config system, event tracking, and fleet deployment by Claude (Anthropic's Opus 4.6) and [Willy Van Sickle](https://github.com/WillyV3).
+Go rewrite of [claude-peers-mcp](https://github.com/louislva/claude-peers-mcp) by louislva. Extended with cross-machine networking, NATS, fleet memory, AI daemons, and fleet deployment by Claude (Anthropic's Opus 4.6) and [Willy Van Sickle](https://github.com/WillyV3). Daemon execution powered by [vinayprograms/agent](https://github.com/vinayprograms/agent).
 
 ## License
 

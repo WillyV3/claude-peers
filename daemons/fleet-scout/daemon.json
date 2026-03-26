@@ -1,0 +1,4 @@
+{
+  "schedule": "interval:15m",
+  "description": "Monitors fleet health across all machines and services"
+}

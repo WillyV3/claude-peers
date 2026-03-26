@@ -1,0 +1,51 @@
+@startuml architecture
+skinparam backgroundColor white
+skinparam defaultFontName monospaced
+skinparam shadowing false
+
+title claude-peers: Cross-Machine AI Fleet Architecture
+
+node "ubuntu-homelab (always-on server)" as homelab {
+  [Broker :7899] as broker
+  database "SQLite" as db
+  queue "NATS JetStream\n:4222" as nats
+  [Supervisor] as super
+  [Dream Watch] as dream
+
+  broker --> db : persist
+  broker --> nats : publish
+  super --> nats : consume triggers
+  dream --> nats : subscribe fleet.>
+}
+
+cloud "LiteLLM :4000" as litellm {
+  [Claude Opus/Sonnet\n(Vertex AI)] as claude_api
+  [Qwen 9B\n(sonia's macbook)] as qwen
+}
+
+super ..> litellm : daemon\nworkflows
+
+node "omarchy" as om {
+  [Claude Code + MCP] as cc1
+}
+
+node "macbook1" as mb {
+  [Claude Code + MCP] as cc2
+}
+
+node "thinkbook" as tb {
+  [Claude Code + MCP] as cc3
+}
+
+node "raspdeck" as rp {
+  [Gridwatch Dashboard] as gw
+  [Claude Code + MCP] as cc4
+}
+
+cc1 --> broker : Tailscale
+cc2 --> broker : Tailscale
+cc3 --> broker : Tailscale
+cc4 --> broker : Tailscale
+gw --> broker : poll stats
+gw ..> nats : events feed
+@enduml
