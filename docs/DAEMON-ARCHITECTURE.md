@@ -246,7 +246,7 @@ llm.{machine}.request      — LLM inference activity
 nats-server --jetstream --store_dir /var/lib/nats --addr 0.0.0.0 --port 4222
 
 # Machines connect via Tailscale
-nats sub "fleet.>" --server nats://100.109.211.128:4222
+nats sub "fleet.>" --server nats://<broker-ip>:4222
 ```
 
 ## Gridwatch integration

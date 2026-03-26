@@ -1,5 +1,5 @@
 claude-peers
 claude-peers-*
-claude-peers
 package/
 *.tgz
+deploy.conf

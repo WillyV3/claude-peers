@@ -179,13 +179,13 @@ Daemon workflows run through LiteLLM, routing to Claude Opus (heavy reasoning), 
 ```json
 {
   "role": "client",
-  "broker_url": "http://100.109.211.128:7899",
-  "machine_name": "omarchy",
+  "broker_url": "http://<broker-ip>:7899",
+  "machine_name": "my-machine",
   "stale_timeout": 300,
-  "nats_url": "nats://100.109.211.128:4222",
-  "daemon_dir": "/home/user/claude-peers-daemons",
-  "agent_bin": "/home/user/.local/bin/agent",
-  "llm_base_url": "http://100.109.211.128:4000/v1",
+  "nats_url": "nats://<broker-ip>:4222",
+  "daemon_dir": "/path/to/daemons",
+  "agent_bin": "/path/to/agent",
+  "llm_base_url": "http://<litellm-host>:4000/v1",
   "llm_model": "vertex_ai/claude-sonnet-4-6"
 }
 ```
@@ -242,6 +242,9 @@ go build -o claude-peers .
 GOOS=linux GOARCH=amd64 go build -o claude-peers-linux-amd64 .
 GOOS=linux GOARCH=arm64 go build -o claude-peers-linux-arm64 .
 GOOS=darwin GOARCH=arm64 go build -o claude-peers-darwin-arm64 .
+
+cp deploy.conf.example deploy.conf   # first time only
+# edit deploy.conf with your fleet hosts
 ./deploy.sh
 ```
 

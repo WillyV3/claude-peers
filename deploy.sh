@@ -1,62 +1,63 @@
 #!/usr/bin/env bash
-# Deploy claude-peers binary to all fleet machines.
-# Kills running MCP servers first, deploys, verifies.
+# Deploy claude-peers to fleet machines.
+# Configure hosts in deploy.conf (one per line: name:user@host:binary)
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+CONF="$DIR/deploy.conf"
 
-declare -A HOSTS=(
-  [omarchy]="local"
-  [ubuntu-homelab]="willy@100.109.211.128"
-  [raspdeck]="willy@raspdeck"
-  [macbook1]="williamvansickleiii@100.67.104.73"
-  [thinkbook]="willy@100.119.90.27"
-)
+if [ ! -f "$CONF" ]; then
+  cat <<'EOF'
+No deploy.conf found. Create one with your fleet hosts:
 
-declare -A BINARIES=(
-  [omarchy]="$DIR/claude-peers"
-  [ubuntu-homelab]="$DIR/claude-peers-linux-amd64"
-  [raspdeck]="$DIR/claude-peers-linux-arm64"
-  [macbook1]="$DIR/claude-peers-darwin-arm64"
-  [thinkbook]="$DIR/claude-peers-linux-amd64"
-)
+  # deploy.conf — one line per machine
+  # format: name:ssh_target:binary_name
+  # binary_name is one of: claude-peers, claude-peers-linux-amd64,
+  #   claude-peers-linux-arm64, claude-peers-darwin-arm64
+  ubuntu-homelab:willy@homelab-ip:claude-peers-linux-amd64
+  raspdeck:willy@raspdeck-ip:claude-peers-linux-arm64
+  macbook1:user@macbook-ip:claude-peers-darwin-arm64
+  thinkbook:willy@thinkbook-ip:claude-peers-linux-amd64
 
-declare -A DEST=(
-  [omarchy]="$HOME/.local/bin/claude-peers"
-  [ubuntu-homelab]="~/.local/bin/claude-peers"
-  [raspdeck]="~/.local/bin/claude-peers"
-  [macbook1]="~/.local/bin/claude-peers"
-  [thinkbook]="~/.local/bin/claude-peers"
-)
+Broker host (for restart after deploy):
+  # Set BROKER_SSH to the broker's ssh target
+  BROKER_SSH=willy@homelab-ip
+EOF
+  exit 1
+fi
 
-for machine in "${!HOSTS[@]}"; do
-  host="${HOSTS[$machine]}"
-  bin="${BINARIES[$machine]}"
-  dest="${DEST[$machine]}"
+BROKER_SSH=""
 
-  echo -n "[$machine] "
+while IFS= read -r line; do
+  # Skip comments and empty lines
+  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  [[ -z "${line// }" ]] && continue
 
-  if [ "$host" = "local" ]; then
-    pkill -f "claude-peers server" 2>/dev/null || true
-    sleep 0.5
-    cp "$bin" "$dest"
-    chmod +x "$dest"
-    echo "deployed (local)"
-  else
-    ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" "pkill -f 'claude-peers server' 2>/dev/null; pkill -f 'claude-peers broker' 2>/dev/null; true" 2>/dev/null
-    sleep 0.5
-    scp -q "$bin" "$host:$dest" 2>/dev/null && echo "deployed" || echo "FAILED"
-    ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" "chmod +x $dest" 2>/dev/null
+  # Handle BROKER_SSH directive
+  if [[ "$line" =~ ^BROKER_SSH= ]]; then
+    BROKER_SSH="${line#BROKER_SSH=}"
+    continue
   fi
-done
 
-# Restart broker
-echo ""
-echo "Restarting broker on ubuntu-homelab..."
-ssh -o ConnectTimeout=5 -o BatchMode=yes willy@100.109.211.128 "systemctl --user restart claude-peers-broker" 2>/dev/null
-sleep 2
+  IFS=: read -r name host bin <<< "$line"
+  echo -n "[$name] "
 
-# Verify
-echo ""
-echo "Verifying..."
-claude-peers status
+  if [ ! -f "$DIR/$bin" ]; then
+    echo "SKIP (binary $bin not found, run go build first)"
+    continue
+  fi
+
+  ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" \
+    "pkill -f 'claude-peers server' 2>/dev/null; pkill -f 'claude-peers broker' 2>/dev/null; true" 2>/dev/null
+  sleep 0.3
+  scp -q "$DIR/$bin" "$host:~/.local/bin/claude-peers" 2>/dev/null && echo "ok" || echo "FAIL"
+done < "$CONF"
+
+if [ -n "$BROKER_SSH" ]; then
+  echo ""
+  echo "Restarting broker..."
+  ssh -o ConnectTimeout=5 -o BatchMode=yes "$BROKER_SSH" \
+    "systemctl --user restart claude-peers-broker 2>/dev/null" || true
+  sleep 2
+  claude-peers status 2>/dev/null || echo "(run 'claude-peers status' to verify)"
+fi

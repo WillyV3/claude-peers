@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	natsDefaultURL = "nats://100.109.211.128:4222"
+	natsDefaultURL = "nats://127.0.0.1:4222"
 	streamName     = "FLEET"
 )
 

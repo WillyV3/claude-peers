@@ -1,0 +1,16 @@
+# deploy.conf — fleet machine definitions
+# format: name:ssh_target:binary_name
+# Copy to deploy.conf and fill in your IPs.
+
+# Linux amd64 machines
+ubuntu-homelab:willy@<homelab-ip>:claude-peers-linux-amd64
+thinkbook:willy@<thinkbook-ip>:claude-peers-linux-amd64
+
+# Linux arm64 machines (Raspberry Pi)
+raspdeck:willy@<raspdeck-ip>:claude-peers-linux-arm64
+
+# macOS arm64 machines
+macbook1:user@<macbook-ip>:claude-peers-darwin-arm64
+
+# Broker SSH target (for auto-restart after deploy)
+BROKER_SSH=willy@<homelab-ip>

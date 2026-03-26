@@ -166,7 +166,7 @@ func cliInit(args []string) {
 
 Examples:
   claude-peers init broker
-  claude-peers init client http://100.109.211.128:7899`)
+  claude-peers init client http://your-server:7899`)
 		os.Exit(1)
 	}
 
