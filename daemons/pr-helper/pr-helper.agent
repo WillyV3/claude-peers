@@ -16,17 +16,22 @@ Rules:
 - Only fix: merge conflicts, lint errors, stale descriptions, formatting
 - If a PR needs architectural decisions, leave a comment and move on"""
 
-GOAL check_prs """Use bash to check open PRs across repos.
+GOAL check_prs """Check open PRs across repos and fix what you can.
 
-For each repo in $repos:
+First, verify prerequisites:
+1. Run: gh auth status
+   If NOT authenticated, output "SKIP: gh CLI not authenticated on this machine" and stop.
+
+Then for each repo in $repos:
 1. Run: gh pr list --repo $github_user/<repo> --state open --json number,title,mergeable,statusCheckRollup
-2. For each PR that has merge conflicts or failing checks:
+2. If no open PRs, skip that repo.
+3. For each PR that has merge conflicts or failing checks:
    a. Clone the repo to /tmp/pr-helper-<repo>
    b. Check out the PR branch
    c. If merge conflict: attempt to resolve (abort if non-trivial)
    d. If lint/format failing: run the project's lint command and fix
    e. Push fixes if any were made
-3. Output a summary of actions taken
+4. Output a summary of actions taken
 
 Be concise. Report what you fixed and what needs human attention."""
 

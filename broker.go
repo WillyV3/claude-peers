@@ -24,9 +24,10 @@ func generatePeerID() string {
 }
 
 type Broker struct {
-	db   *sql.DB
-	nats *NATSPublisher
-	mu   sync.RWMutex
+	db          *sql.DB
+	nats        *NATSPublisher
+	fleetMemory string
+	mu          sync.RWMutex
 }
 
 func newBroker() (*Broker, error) {
@@ -281,15 +282,16 @@ func (b *Broker) unregister(req UnregisterRequest) {
 	b.db.Exec("DELETE FROM messages WHERE to_id = ? AND delivered = 0", req.ID)
 }
 
-// fleetMemory stores the latest consolidated fleet briefing.
-var fleetMemory string
-
 func (b *Broker) setFleetMemory(content string) {
-	fleetMemory = content
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.fleetMemory = content
 }
 
 func (b *Broker) getFleetMemory() string {
-	return fleetMemory
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.fleetMemory
 }
 
 func (b *Broker) peerCount() int {

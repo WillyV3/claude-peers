@@ -111,6 +111,7 @@ func (p *NATSPublisher) publish(subject string, event FleetEvent) {
 
 func (p *NATSPublisher) close() {
 	if p != nil && p.nc != nil {
+		p.nc.Drain()
 		p.nc.Close()
 	}
 }

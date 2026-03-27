@@ -46,7 +46,10 @@ func cliDreamWatch() {
 		dreamPollLoop()
 		return
 	}
-	defer nc.Close()
+	defer func() {
+		nc.Drain()
+		nc.Close()
+	}()
 
 	// Periodic consolidation even if events are slow
 	ticker := time.NewTicker(5 * time.Minute)
