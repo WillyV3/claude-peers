@@ -1,0 +1,49 @@
+digraph daemonflow {
+  bgcolor="#FAFAFA"
+  rankdir=LR
+  fontname="Helvetica"
+  node [fontname="Helvetica" fontsize=10 style="filled" fillcolor="#FFFFFF" color="#CCCCCC" penwidth=0.8]
+  edge [fontname="Helvetica" fontsize=9 color="#888888" penwidth=0.8]
+
+  label="Daemon Filesystem Layout + Supervisor Discovery"
+  labelloc=t
+  fontsize=14
+  fontname="Helvetica Bold"
+
+  subgraph cluster_fs {
+    label="daemons/" fontsize=10 style="dashed" color="#AAAAAA" bgcolor="#F0F0F0"
+
+    d1 [label="fleet-memory/\n  fleet-memory.agent\n  daemon.json\n  agent.toml\n  policy.toml" shape=folder fillcolor="#E8F5E9" fontsize=9]
+    d2 [label="fleet-scout/\n  fleet-scout.agent\n  daemon.json\n  agent.toml\n  triage.sh" shape=folder fillcolor="#E8F5E9" fontsize=9]
+    d3 [label="sync-janitor/\n  sync-janitor.agent\n  daemon.json\n  triage.sh" shape=folder fillcolor="#E8F5E9" fontsize=9]
+  }
+
+  supervisor [label="Supervisor\n(discovers all daemons\non startup)" shape=box fillcolor="#FFF3E0"]
+
+  subgraph cluster_schedule {
+    label="Schedule Router" fontsize=10 style="dashed" color="#AAAAAA" bgcolor="#F0F0F0"
+    sched_int [label="Interval\nrunOnInterval()" shape=box fillcolor="#E3F2FD"]
+    sched_evt [label="Event\nsubscribeFleet()" shape=box fillcolor="#E3F2FD"]
+  }
+
+  invoke [label="invoke()\n- concurrency guard\n- cooldown check\n- triage\n- agent exec\n- publish result" shape=box fillcolor="#F3E5F5"]
+
+  subgraph cluster_config {
+    label="daemon.json" fontsize=10 style="dashed" color="#AAAAAA" bgcolor="#F0F0F0"
+    cfg_int [label="\"schedule\": \"interval:15m\"" shape=note fillcolor="#FFFFCC" color="#DDDDAA" fontsize=9]
+    cfg_evt [label="\"schedule\": \"event:fleet.>\"" shape=note fillcolor="#FFFFCC" color="#DDDDAA" fontsize=9]
+  }
+
+  d1 -> supervisor [style=dashed]
+  d2 -> supervisor [style=dashed]
+  d3 -> supervisor [style=dashed]
+
+  supervisor -> sched_int [label="interval daemons"]
+  supervisor -> sched_evt [label="event daemons"]
+
+  cfg_int -> sched_int [style=dotted arrowhead=none]
+  cfg_evt -> sched_evt [style=dotted arrowhead=none]
+
+  sched_int -> invoke
+  sched_evt -> invoke
+}

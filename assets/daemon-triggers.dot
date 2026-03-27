@@ -1,0 +1,72 @@
+digraph triggers {
+  bgcolor="#FAFAFA"
+  rankdir=TB
+  fontname="Helvetica"
+  node [fontname="Helvetica" fontsize=10 style="filled" fillcolor="#FFFFFF" color="#CCCCCC" penwidth=0.8]
+  edge [fontname="Helvetica" fontsize=9 color="#888888" penwidth=0.8]
+
+  label="Supervisor: Trigger -> Triage -> Execute -> Publish"
+  labelloc=t
+  fontsize=14
+  fontname="Helvetica Bold"
+
+  // Trigger sources
+  subgraph cluster_triggers {
+    label="Trigger Sources" fontsize=10 style="dashed" color="#AAAAAA" bgcolor="#F0F0F0"
+    interval [label="Interval Timer\n(e.g. every 15m)" shape=box fillcolor="#E3F2FD"]
+    nats_event [label="NATS Event\n(e.g. fleet.peer.joined)" shape=box fillcolor="#E3F2FD"]
+    startup [label="Startup\n(initial run)" shape=box fillcolor="#E3F2FD"]
+  }
+
+  // Decision chain
+  concurrency [label="Already\nrunning?" shape=diamond fillcolor="#FFF3E0"]
+  cooldown [label="In cooldown?\n(<5min since fail)" shape=diamond fillcolor="#FFF3E0"]
+  has_triage [label="triage.sh\nexists?" shape=diamond fillcolor="#FFF3E0"]
+
+  // Triage
+  triage [label="Run triage.sh\n(bash, zero cost)" shape=box fillcolor="#E8F5E9"]
+  triage_check [label="Exit code?" shape=diamond fillcolor="#FFF3E0"]
+
+  // Execution
+  agent [label="Run agent binary\n(Haiku/Sonnet via LiteLLM)" shape=box fillcolor="#F3E5F5"]
+  result_check [label="Exit code?" shape=diamond fillcolor="#FFF3E0"]
+
+  // Outcomes
+  skip_busy [label="Skip\n(busy)" shape=box fillcolor="#EEEEEE" fontsize=9]
+  skip_cool [label="Skip\n(cooldown)" shape=box fillcolor="#EEEEEE" fontsize=9]
+  skip_triage [label="Skip\n(no work needed)" shape=box fillcolor="#EEEEEE" fontsize=9]
+  success [label="Extract output\nClear cooldown" shape=box fillcolor="#E8F5E9"]
+  failure [label="Set 5min cooldown" shape=box fillcolor="#FFEBEE"]
+
+  // Publish
+  publish [label="Publish to NATS\nfleet.daemon.{name}" shape=box fillcolor="#E3F2FD"]
+  gridwatch [label="Gridwatch ticker\npicks up event" shape=box fillcolor="#E8F5E9"]
+
+  // Flow
+  interval -> concurrency
+  nats_event -> concurrency
+  startup -> concurrency
+
+  concurrency -> skip_busy [label="yes"]
+  concurrency -> cooldown [label="no"]
+
+  cooldown -> skip_cool [label="yes"]
+  cooldown -> has_triage [label="no"]
+
+  has_triage -> triage [label="yes"]
+  has_triage -> agent [label="no"]
+
+  triage -> triage_check
+  triage_check -> skip_triage [label="exit != 0"]
+  triage_check -> agent [label="exit 0\n(work found)"]
+
+  agent -> result_check
+  result_check -> success [label="exit 0"]
+  result_check -> failure [label="exit != 0"]
+
+  success -> publish
+  failure -> publish
+  skip_triage -> publish [style=dashed label="triage event"]
+
+  publish -> gridwatch
+}

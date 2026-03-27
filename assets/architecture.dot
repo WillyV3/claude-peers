@@ -1,0 +1,70 @@
+digraph architecture {
+  bgcolor="#FAFAFA"
+  rankdir=TB
+  fontname="Helvetica"
+  node [fontname="Helvetica" fontsize=11 style="filled" fillcolor="#FFFFFF" color="#CCCCCC" shape=box penwidth=0.8]
+  edge [fontname="Helvetica" fontsize=9 color="#888888" penwidth=0.8]
+
+  label="claude-peers: Fleet Architecture"
+  labelloc=t
+  fontsize=16
+  fontname="Helvetica Bold"
+
+  subgraph cluster_raspdeck {
+    label="raspdeck" fontsize=10 style="dashed" color="#AAAAAA" bgcolor="#F5F5F5"
+    gridwatch [label="Gridwatch\n(Go, embedded UI)" fillcolor="#E8F5E9"]
+    note_gw [label="5-page kiosk dashboard\nFleet | Services | NATS\nAgents | Peer Network\nLive scrolling ticker" shape=note fillcolor="#FFFFCC" color="#DDDDAA" fontsize=8]
+    gridwatch -> note_gw [style=invis]
+  }
+
+  subgraph cluster_homelab {
+    label="ubuntu-homelab" fontsize=10 style="dashed" color="#AAAAAA" bgcolor="#F5F5F5"
+    broker [label="Broker\n(HTTP API)" fillcolor="#E3F2FD"]
+    nats [label="NATS\nJetStream" fillcolor="#E3F2FD"]
+    supervisor [label="Supervisor" fillcolor="#FFF3E0"]
+    litellm [label="LiteLLM\nProxy" fillcolor="#F3E5F5"]
+    dream [label="Dream\n(fleet memory)" fillcolor="#FFF3E0"]
+
+    note_auth [label="Bearer token auth\non all endpoints" shape=note fillcolor="#FFFFCC" color="#DDDDAA" fontsize=8]
+    broker -> note_auth [style=invis]
+  }
+
+  subgraph cluster_clients {
+    label="Client Machines" fontsize=10 style="dashed" color="#AAAAAA" bgcolor="#F5F5F5"
+    omarchy [label="omarchy" fillcolor="#FFFFFF"]
+    macbook1 [label="macbook1" fillcolor="#FFFFFF"]
+    thinkbook [label="thinkbook" fillcolor="#FFFFFF"]
+  }
+
+  subgraph cluster_edge {
+    label="Edge Devices" fontsize=10 style="dashed" color="#AAAAAA" bgcolor="#F5F5F5"
+    willyv4 [label="willyv4\n(Ghostbox)" fillcolor="#FFF3E0"]
+  }
+
+  // Gridwatch connections
+  gridwatch -> broker [label="peers + events\n(authed HTTP)" dir=back]
+  gridwatch -> nats [label="subscribe\nfleet.>"]
+  gridwatch -> omarchy [label="SSH stats" style=dashed color="#BBBBBB"]
+  gridwatch -> macbook1 [label="" style=dashed color="#BBBBBB"]
+  gridwatch -> thinkbook [label="" style=dashed color="#BBBBBB"]
+  gridwatch -> willyv4 [label="" style=dashed color="#BBBBBB"]
+
+  // Broker connections
+  omarchy -> broker [label="MCP\nregister/heartbeat/messages"]
+  macbook1 -> broker [label=""]
+  thinkbook -> broker [label=""]
+  willyv4 -> broker [label="status heartbeat"]
+
+  // NATS connections
+  broker -> nats [label="publish\nevents" dir=both]
+  supervisor -> nats [label="subscribe\ntriggers" dir=back]
+  supervisor -> nats [label="publish\nresults"]
+  dream -> nats [label="subscribe\nfleet.>" dir=back]
+  dream -> broker [label="POST\n/fleet-memory"]
+
+  // Supervisor -> LiteLLM
+  supervisor -> litellm [label="agent\ninvocation"]
+
+  // LLM summary generation
+  omarchy -> litellm [label="summary\ngeneration" style=dashed color="#BBBBBB"]
+}

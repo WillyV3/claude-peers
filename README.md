@@ -207,9 +207,11 @@ Service monitoring reads from `~/.config/claude-peers/service-monitor.json`:
 
 ## Daemons
 
-![Daemon Event Flow](assets/daemon-flow.png)
+![Daemon Filesystem Layout](assets/daemon-flow.png)
 
-Daemons are AI background processes that maintain your infrastructure without prompting. The supervisor watches for triggers (NATS events or time intervals) and spawns agent workflows using [vinayprograms/agent](https://github.com/vinayprograms/agent).
+![Daemon Trigger Flow](assets/daemon-triggers.png)
+
+Daemons are AI background processes that maintain your infrastructure without prompting. The supervisor watches for triggers (NATS events or time intervals), runs zero-cost triage checks, and spawns agent workflows using [vinayprograms/agent](https://github.com/vinayprograms/agent).
 
 Each daemon is a directory with 4 files:
 
