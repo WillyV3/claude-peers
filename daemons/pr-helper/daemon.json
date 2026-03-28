@@ -1,4 +1,1 @@
-{
-  "schedule": "interval:30m",
-  "description": "Keep PRs mergeable across fleet repos. Fix conflicts, update descriptions, fix lint."
-}
+{"schedule":"interval:15m","description":"Keep PRs mergeable across fleet repos"}

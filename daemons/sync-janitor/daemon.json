@@ -1,4 +1,1 @@
-{
-  "schedule": "interval:30m",
-  "description": "Detect Syncthing conflict files, analyze them, and email a resolution report"
-}
+{"schedule":"interval:15m","description":"Detect Syncthing conflict files, analyze them, and email a resolution report"}

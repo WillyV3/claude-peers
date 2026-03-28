@@ -1,4 +1,1 @@
-{
-  "schedule": "interval:15m",
-  "description": "Monitors fleet health across all machines and services"
-}
+{"schedule":"interval:10m","description":"Monitors fleet health across all machines and services"}
