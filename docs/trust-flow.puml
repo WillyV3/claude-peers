@@ -1,22 +1,22 @@
 @startuml Trust Flow
-!theme cyborg
-skinparam backgroundColor #0B0C16
-skinparam defaultFontColor #ddf7ff
-skinparam defaultFontName "Monaspace Krypton"
-skinparam sequenceArrowColor #6a6e95
-skinparam sequenceLifeLineBorderColor #1a1c30
-skinparam sequenceParticipantBorderColor #1a1c30
-skinparam sequenceParticipantBackgroundColor #0f1019
-skinparam sequenceDividerBackgroundColor #1a1c30
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontColor #1a1a2e
+skinparam defaultFontName "Helvetica"
+skinparam sequenceArrowColor #555577
+skinparam sequenceLifeLineBorderColor #ccccdd
+skinparam sequenceParticipantBorderColor #ccccdd
+skinparam sequenceParticipantBackgroundColor #f8f9fc
+skinparam sequenceDividerBackgroundColor #e8ecf4
+skinparam shadowing false
 
-title <color:#82FB9C><b>TRUST FLOW</b></color>\n<color:#6a6e95>From request to enforcement</color>
+title <b>TRUST FLOW</b>\nFrom request to enforcement
 
-participant "Claude Code\nSession" as client #0f1019
-participant "Trust\nBroker" as broker #0f1019
-participant "UCAN\nValidator" as ucan #0f1019
-participant "Health\nChecker" as health #0f1019
-participant "NATS" as nats #0f1019
-participant "Wazuh\nBridge" as wazuh #0f1019
+participant "Claude Code\nSession" as client #f8f9fc
+participant "Trust\nBroker" as broker #f4fff0
+participant "UCAN\nValidator" as ucan #e4f0e8
+participant "Health\nChecker" as health #e4f0e8
+participant "NATS" as nats #e0f0ff
+participant "Wazuh\nBridge" as wazuh #fff0f0
 
 == Normal Request ==
 
@@ -26,32 +26,32 @@ ucan -> ucan : Verify Ed25519 signature
 ucan -> ucan : Check expiry (30s leeway)
 ucan -> ucan : Verify delegation chain (prf)
 ucan -> ucan : Check capability: peer/list
-ucan --> broker : <color:#82FB9C>Claims valid</color>
+ucan --> broker : <color:#2d8a4e>Claims valid</color>
 broker -> health : getMachineHealth(machine)
-health --> broker : <color:#82FB9C>status: healthy</color>
-broker --> client : <color:#82FB9C>200 OK</color> [peer list]
+health --> broker : <color:#2d8a4e>status: healthy</color>
+broker --> client : <color:#2d8a4e>200 OK</color> [peer list]
 
 == Security Event ==
 
-wazuh -> nats : <color:#ff6b6b>fleet.security.fim</color>\nlevel=12 (UCAN credential modified)
+wazuh -> nats : <color:#cc3333>fleet.security.fim</color>\nlevel=12 (UCAN credential modified)
 nats -> broker : SecurityEvent
 broker -> health : updateMachineHealth(+10)
-health -> health : score=10 -> <color:#ff6b6b>quarantined</color>
+health -> health : score=10 -> <color:#cc3333>quarantined</color>
 
 == Quarantined Request ==
 
 client -> broker : POST /send-message\nAuthorization: Bearer <jwt>
 broker -> ucan : Validate(token)
-ucan --> broker : <color:#82FB9C>Claims valid</color>
+ucan --> broker : <color:#2d8a4e>Claims valid</color>
 broker -> health : getMachineHealth(machine)
-health --> broker : <color:#ff6b6b>status: quarantined</color>
-broker --> client : <color:#ff6b6b>403 QUARANTINED</color>
+health --> broker : <color:#cc3333>status: quarantined</color>
+broker --> client : <color:#cc3333>403 QUARANTINED</color>
 
 == Recovery ==
 
 actor Operator
 Operator -> broker : POST /unquarantine\n{"machine": "compromised-host"}
 broker -> health : reset score=0, status=healthy
-broker --> Operator : <color:#82FB9C>200 OK</color>
+broker --> Operator : <color:#2d8a4e>200 OK</color>
 
 @enduml
