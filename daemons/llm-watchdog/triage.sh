@@ -1,4 +1,4 @@
 #!/bin/bash
-# LLM Watchdog: always run -- monitor even when healthy.
+# LLM Watchdog: always run.
 echo "scheduled check"
 exit 0

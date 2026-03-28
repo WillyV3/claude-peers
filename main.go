@@ -76,6 +76,10 @@ func main() {
 			os.Exit(1)
 		}
 		cliUnquarantine(os.Args[2])
+	case "security-watch":
+		if err := runSecurityWatch(ctx); err != nil {
+			log.Fatal(err)
+		}
 	case "kill-broker":
 		cliKillBroker()
 	default:
@@ -103,6 +107,7 @@ Usage:
   claude-peers gridwatch                        Start fleet health dashboard (reads gridwatch.json)
   claude-peers wazuh-bridge                     Tail Wazuh alerts and publish to NATS
   claude-peers unquarantine <machine>           Remove quarantine from a machine
+  claude-peers security-watch                   Correlate security events and alert
   claude-peers kill-broker                      Stop the broker daemon
 
 Token roles: peer-session, fleet-read, fleet-write, cli
