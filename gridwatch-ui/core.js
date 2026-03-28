@@ -1,7 +1,7 @@
 // ========== GRIDWATCH CORE ==========
 // Carousel, clock, polling, shared utilities.
 
-const PAGE_LABELS = ['FLEET', 'SERVICES', 'NATS', 'AGENTS', 'PEERS'];
+const PAGE_LABELS = ['FLEET', 'SERVICES', 'NATS', 'AGENTS', 'PEERS', 'SECURITY'];
 const ROTATE_MS = 15000;
 
 // --- Utilities ---
@@ -222,7 +222,10 @@ async function pollAll() {
   if (willyv4.status === 'fulfilled' && willyv4.value && willyv4.value.battery) {
     updateWillyv4Tile(willyv4.value);
   }
-  if (security.status === 'fulfilled') updateSecurityBadges(security.value);
+  if (security.status === 'fulfilled') {
+    updateSecurityBadges(security.value);
+    updateSecurityPage(security.value);
+  }
 
   // Page 5: Peers (needs both stats + peers data).
   if (stats.status === 'fulfilled' || peers.status === 'fulfilled') {

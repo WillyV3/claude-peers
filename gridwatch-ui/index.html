@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="nats.css">
 <link rel="stylesheet" href="agents.css">
 <link rel="stylesheet" href="peers.css">
+<link rel="stylesheet" href="security.css">
 </head>
 <body>
 <div class="shell">
@@ -37,6 +38,9 @@
     <div class="page" id="page-peers">
       <canvas id="peer-canvas"></canvas>
     </div>
+    <div class="page" id="page-security">
+      <div class="sec-layout" id="sec-layout"></div>
+    </div>
   </div>
   <div class="ticker" id="ticker"></div>
   <div class="ftr">
@@ -47,6 +51,7 @@
       <span class="dot" data-page="2"></span>
       <span class="dot" data-page="3"></span>
       <span class="dot" data-page="4"></span>
+      <span class="dot" data-page="5"></span>
     </div>
   </div>
 </div>
@@ -56,5 +61,6 @@
 <script src="nats.js"></script>
 <script src="agents.js"></script>
 <script src="peers.js"></script>
+<script src="security.js"></script>
 </body>
 </html>
