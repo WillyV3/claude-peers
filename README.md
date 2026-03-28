@@ -1,39 +1,43 @@
 # Sontara Lattice
 
-Trust-first runtime for autonomous agent services. Single Go binary, runs on anything from a Pi Zero to a cloud VM.
+A Claude-native fleet platform. Run Claude Code sessions and autonomous Claude daemons across physical machines with cryptographic trust, scoped capabilities, continuous security monitoring, and real-time observability. Single Go binary, runs on anything from a Pi Zero to a rack server.
 
 ## What this is
 
-A platform for running autonomous AI agents that coordinate over a private mesh with cryptographic trust, continuous security monitoring, and real-time observability. Every agent gets scoped capabilities, every action is auditable, compromised nodes get quarantined automatically.
+Your Claude Code instances talk to each other, run autonomous background daemons, and operate as a trusted fleet. Every session and daemon gets an Ed25519 identity and a capability-scoped token. The trust broker validates every action. Wazuh EDR monitors every endpoint. Compromised machines get quarantined automatically. You see it all on a real-time dashboard.
 
-Built on: **UCAN capability tokens** + **NATS JetStream** + **Wazuh EDR** + **Ed25519 identity**
+This is not a framework or a spec. It's running in production on a 7-machine Tailscale mesh with Claude Code sessions coordinating across Arch, Ubuntu, Debian, and macOS -- including a Raspberry Pi cyberdeck that carries the fleet in a backpack.
+
+Built on: **Claude Code** + **UCAN capability tokens** + **NATS JetStream** + **Wazuh EDR** + **Ed25519 identity**
 
 ## Architecture
 
 ```
-Agent A (fleet-scout)      Agent B (pr-helper)       Agent C (your-service)
-  UCAN: [health/read]       UCAN: [repo/write]        UCAN: [custom/scope]
-  Policy: read-only          Policy: no force-push     Policy: rate-limited
-       |                          |                          |
-       +----------- NATS JetStream (event bus) -------------+
-                                  |
-                           Trust Broker
-                      (UCAN validation + health scoring)
-                                  |
-                    +-------------+-------------+
-                    |                           |
-             Wazuh EDR Bridge             Gridwatch Dashboard
-          (continuous endpoint            (real-time fleet
-           monitoring + alerts)            observability)
+Claude Code (omarchy)    Claude Code (thinkbook)    Daemon: fleet-scout    Daemon: pr-helper
+  MCP Server               MCP Server                Agentfile + Policy     Agentfile + Policy
+  UCAN: [peer-session]     UCAN: [peer-session]      UCAN: [fleet-read]     UCAN: [fleet-write]
+       |                        |                          |                       |
+       +------------------ NATS JetStream (fleet.*) --------------------------+
+                                        |
+                                 Trust Broker
+                          (UCAN validation + peer registry
+                           + health scoring + fleet memory)
+                                        |
+                          +-------------+-------------+
+                          |                           |
+                   Wazuh EDR Bridge             Gridwatch Dashboard
+                (file integrity, auth logs,    (5-page real-time kiosk:
+                 process + network monitoring)  fleet, services, NATS,
+                                                daemons, peer graph)
 ```
 
-Each agent gets:
-- **Identity**: Ed25519 keypair (hardware-backed where available)
-- **Capabilities**: UCAN token scoped to exactly what it needs, delegated from a root of trust
-- **Policy**: Guardrails on what tools/paths/actions are permitted
-- **Coordination**: NATS pub/sub for event-driven communication
-- **Monitoring**: Wazuh file integrity, auth logs, process monitoring
-- **Trust**: Dynamic -- health score degrades on security events, capabilities get restricted or revoked
+Every participant in the lattice gets:
+- **Identity**: Ed25519 keypair (hardware-backed where available -- TPM, Secure Enclave)
+- **Capabilities**: UCAN JWT token scoped to exactly the broker endpoints it needs, delegated from a root of trust with attenuation enforcement
+- **Policy**: Guardrails on tools, paths, and actions (for daemons)
+- **Coordination**: NATS pub/sub for event-driven communication across machines
+- **Monitoring**: Wazuh file integrity, auth log analysis, process monitoring
+- **Dynamic trust**: Health score degrades on security events -- capabilities get restricted or revoked automatically
 
 ## Core Components
 
@@ -112,8 +116,10 @@ Embedded in the binary. Serves on any port. Auto-rotates pages.
 ### Fleet Memory (Dream)
 Consolidates fleet activity into Claude-compatible memory files. Peers fetch fleet state on startup so every Claude session knows what's happening across the mesh. Updated via NATS events or periodic polling.
 
-### Peer Network
-MCP server for Claude Code integration. Each Claude session registers, discovers peers, sends/receives messages in real-time via JSON-RPC notifications. Auto-generates summaries of what each session is working on.
+### Claude Peers (MCP Server)
+The foundational layer. Every Claude Code session runs an MCP server that registers with the broker, discovers other sessions across machines, and exchanges messages in real-time via JSON-RPC channel notifications. Sessions auto-generate LLM summaries of their current work. Peers see each other's machine, project, branch, TTY, and summary. Messages arrive instantly -- no polling on the Claude side.
+
+This is what makes Claude Code sessions aware of each other. Everything else in the lattice builds on this.
 
 ## Quick Start
 

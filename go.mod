@@ -1,4 +1,4 @@
-module github.com/wvansickle/claude-peers
+module github.com/Human-Frontier-Labs-Inc/sontara-lattice
 
 go 1.25.7
 
