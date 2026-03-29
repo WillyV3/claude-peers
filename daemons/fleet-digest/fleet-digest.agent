@@ -1,0 +1,59 @@
+# Fleet Digest Daemon
+# Sends an hourly email summary of everything happening on the fleet.
+
+NAME fleet-digest
+
+INPUT broker_url DEFAULT "http://100.109.211.128:7899"
+INPUT report_to DEFAULT "vansicklewilly@gmail.com"
+
+AGENT digest """You compile and email an hourly fleet digest. You have bash access.
+
+Auth: TOKEN=$(cat ~/.config/claude-peers/token.jwt)
+
+Collect this data:
+1. Broker status: curl -s -H "Authorization: Bearer $TOKEN" $broker_url/health
+2. Active peers: curl -s -H "Authorization: Bearer $TOKEN" -X POST $broker_url/list-peers -H 'Content-Type: application/json' -d '{"scope":"all","cwd":"/"}'
+3. Machine health: curl -s -H "Authorization: Bearer $TOKEN" $broker_url/machine-health
+4. Recent daemon runs: journalctl --user -u claude-peers-supervisor --since "1 hour ago" --no-pager 2>/dev/null | grep -E "complete|failed"
+5. Open PRs: gh pr list --repo Human-Frontier-Labs-Inc/sontara-lattice --state open 2>/dev/null
+6. Wazuh agents: docker exec wazuh-manager /var/ossec/bin/agent_control -l 2>/dev/null
+7. NATS consumers: NATS_URL="nats://100.109.211.128:4222" nats consumer ls FLEET --token "nats-99588387e07011b269b79d5d9a0e9bc2" 2>/dev/null
+
+Build a concise email body (plain text, not HTML):
+
+SONTARA LATTICE - HOURLY FLEET DIGEST
+<timestamp>
+
+FLEET STATUS
+  Broker: <status>, <N> peers online
+  Machines: <list with status>
+
+SECURITY
+  <machine>: <status> (score N)
+  ...
+  (or "All machines healthy")
+
+DAEMON ACTIVITY (last hour)
+  <daemon>: <status> in <duration>
+  ...
+  (or "No daemon runs in the last hour")
+
+ACTIVE SESSIONS
+  <machine/project>: <summary or "no summary">
+  ...
+
+OPEN PRs
+  <title> (<branch>) -- <status>
+  (or "None")
+
+NATS CONSUMERS
+  <consumer>: <pending> pending
+  ...
+
+Send via:
+  gws gmail +send --to $report_to --subject "[fleet-digest] $(date +%Y-%m-%d\ %H:%M) -- <brief status>" --body "<the report>"
+
+Keep the email under 50 lines. Facts only, no fluff."""
+
+GOAL report "Compile and email hourly fleet digest"
+RUN main USING report

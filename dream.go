@@ -15,9 +15,9 @@ const fleetMemoryFile = "fleet-activity.md"
 func cliDream() {
 	log.SetFlags(0)
 
-	peers, events := fetchFleetState()
+	peers, events, health := fetchFleetState()
 
-	content := buildFleetMemory(peers, events)
+	content := buildFleetMemory(peers, events, health)
 	memPath := writeFleetMemory(content)
 
 	fmt.Printf("[dream] Fleet memory updated: %s\n", memPath)
@@ -61,8 +61,8 @@ func cliDreamWatch() {
 			events = nil
 		} else {
 			// Still refresh from broker state even if no new events
-			peers, evts := fetchFleetState()
-			content := buildFleetMemory(peers, evts)
+			peers, evts, health := fetchFleetState()
+			content := buildFleetMemory(peers, evts, health)
 			writeFleetMemory(content)
 		}
 	}
@@ -70,21 +70,21 @@ func cliDreamWatch() {
 
 func dreamPollLoop() {
 	for {
-		peers, events := fetchFleetState()
-		content := buildFleetMemory(peers, events)
+		peers, events, health := fetchFleetState()
+		content := buildFleetMemory(peers, events, health)
 		writeFleetMemory(content)
 		time.Sleep(5 * time.Minute)
 	}
 }
 
 func consolidate(events []FleetEvent) {
-	peers, brokerEvents := fetchFleetState()
-	content := buildFleetMemory(peers, brokerEvents)
+	peers, brokerEvents, health := fetchFleetState()
+	content := buildFleetMemory(peers, brokerEvents, health)
 	path := writeFleetMemory(content)
 	log.Printf("[dream] Consolidated %d events -> %s", len(events), path)
 }
 
-func fetchFleetState() ([]Peer, []Event) {
+func fetchFleetState() ([]Peer, []Event, map[string]*MachineHealth) {
 	var peers []Peer
 	cliFetch("/list-peers", ListPeersRequest{Scope: "all", CWD: "/"}, &peers)
 
@@ -94,7 +94,10 @@ func fetchFleetState() ([]Peer, []Event) {
 		events = resp
 	}
 
-	return peers, events
+	var health map[string]*MachineHealth
+	cliFetch("/machine-health", nil, &health)
+
+	return peers, events, health
 }
 
 func fetchEventsRaw() ([]Event, error) {
@@ -103,7 +106,7 @@ func fetchEventsRaw() ([]Event, error) {
 	return events, err
 }
 
-func buildFleetMemory(peers []Peer, events []Event) string {
+func buildFleetMemory(peers []Peer, events []Event, health map[string]*MachineHealth) string {
 	var sb strings.Builder
 
 	sb.WriteString("---\n")
@@ -147,6 +150,25 @@ func buildFleetMemory(peers []Peer, events []Event) string {
 		}
 	}
 
+	// Security status
+	if len(health) > 0 {
+		sb.WriteString("## Security Status\n\n")
+		anyIssues := false
+		for machine, h := range health {
+			if h.Status != "healthy" {
+				anyIssues = true
+				sb.WriteString(fmt.Sprintf("- **%s**: %s (score %d)\n", machine, h.Status, h.Score))
+				if h.LastEventDesc != "" {
+					sb.WriteString(fmt.Sprintf("  Last event: %s\n", h.LastEventDesc))
+				}
+			}
+		}
+		if !anyIssues {
+			sb.WriteString("All machines healthy. Wazuh monitoring active.\n")
+		}
+		sb.WriteString("\n")
+	}
+
 	// Recent events (deduplicated, skip repetitive summary updates)
 	sb.WriteString("## Recent Activity\n\n")
 	if len(events) == 0 {
@@ -170,6 +192,10 @@ func buildFleetMemory(peers []Peer, events []Event) string {
 				continue
 			}
 			seen[key] = true
+			// Skip noisy willyv4 events (ghostbox restarts/heartbeats)
+			if e.Machine == "willyv4" && (e.Type == "summary_changed" || e.Type == "peer_joined" || e.Type == "peer_left") {
+				continue
+			}
 			label := typeLabels[e.Type]
 			if label == "" {
 				label = e.Type

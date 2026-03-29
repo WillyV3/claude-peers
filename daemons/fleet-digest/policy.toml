@@ -1,0 +1,3 @@
+[tools]
+allow = ["bash", "read", "web_fetch", "agent"]
+deny = ["rm -rf", "git push", "shutdown", "reboot"]

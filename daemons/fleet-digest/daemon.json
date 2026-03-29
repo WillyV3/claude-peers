@@ -1,0 +1,4 @@
+{
+  "schedule": "interval:60m",
+  "description": "Hourly fleet digest email -- daemons, security, peers, machine health"
+}
