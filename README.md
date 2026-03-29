@@ -88,7 +88,8 @@ Manages autonomous agent workflows. Each daemon is defined by:
 | llm-watchdog | 10m | Monitor LLM server health, restart if down, alert on anomalies |
 | pr-helper | 15m | Keep PRs mergeable across GitHub orgs |
 | sync-janitor | 15m | Detect and report Syncthing conflicts |
-| librarian | 3h | Audit and update documentation across fleet machines |
+| librarian | 3h | Verify tests, audit docs, submit fix PRs |
+| fleet-digest | 60m | Email hourly fleet status digest |
 
 All daemons have EDR-aware triage gates -- they check machine health before running and refuse to operate from quarantined machines.
 
@@ -201,6 +202,8 @@ claude-peers supervisor                     Run daemon supervisor
 claude-peers gridwatch                      Start fleet dashboard
 claude-peers wazuh-bridge                   Bridge Wazuh alerts to NATS
 claude-peers security-watch                 Correlate security events, escalate, alert
+claude-peers response-daemon                Automated incident response (forensics, IP blocks, email)
+claude-peers sim-attack <scenario> [flags]  Simulate attack scenarios for testing
 claude-peers kill-broker                    Stop the broker daemon
 ```
 
