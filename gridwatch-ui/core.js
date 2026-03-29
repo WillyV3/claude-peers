@@ -64,6 +64,7 @@ function goToPage(idx) {
   requestAnimationFrame(() => {
     pages[idx].classList.add('active');
     dots.forEach((d, i) => d.classList.toggle('active', i === idx));
+    document.querySelectorAll('.page-btn').forEach((b, i) => b.classList.toggle('active', i === idx));
     document.getElementById('page-label').textContent = PAGE_LABELS[idx];
   });
 
@@ -338,6 +339,34 @@ function init() {
     if (e.key === 'ArrowLeft') { prevPage(); pauseRotation(120000); }
     if (e.key === ' ') { e.preventDefault(); togglePause(); }
   });
+
+  // Build web nav buttons (shown on screens >800px via CSS).
+  const navBtns = document.getElementById('page-nav-buttons');
+  if (navBtns) {
+    PAGE_LABELS.forEach((label, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'page-btn' + (i === 0 ? ' active' : '');
+      btn.textContent = label;
+      btn.dataset.page = i;
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        goToPage(i);
+        pauseRotation(120000);
+      });
+      navBtns.appendChild(btn);
+    });
+    // Pause/play button
+    const pauseBtn = document.createElement('button');
+    pauseBtn.className = 'page-btn-pause';
+    pauseBtn.textContent = '||';
+    pauseBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      togglePause();
+      pauseBtn.textContent = autoRotate ? '||' : '\u25B6';
+      pauseBtn.classList.toggle('paused', !autoRotate);
+    });
+    navBtns.appendChild(pauseBtn);
+  }
 
   // Start clock.
   tickClock();

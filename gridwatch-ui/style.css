@@ -18,8 +18,8 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body {
-  width: 800px;
-  height: 480px;
+  width: 100vw;
+  height: 100vh;
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
@@ -29,8 +29,8 @@ html, body {
 
 .shell {
   display: grid;
-  grid-template-rows: 24px 1fr 16px 18px;
-  height: 480px;
+  grid-template-rows: auto 1fr auto auto;
+  height: 100vh;
   padding: 4px 6px;
   gap: 4px;
 }
@@ -43,6 +43,8 @@ html, body {
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
   padding-bottom: 2px;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .logo {
@@ -72,6 +74,55 @@ html, body {
   padding: 1px 6px;
   border-radius: 2px;
 }
+
+/* === PAGE NAV BUTTONS (web mode) === */
+
+.page-nav-buttons {
+  display: none; /* hidden on kiosk, shown on larger screens */
+  gap: 2px;
+  align-items: center;
+}
+
+.page-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-family: inherit;
+  font-size: 8px;
+  letter-spacing: 1px;
+  padding: 3px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.page-btn:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.page-btn.active {
+  background: rgba(124, 248, 247, 0.08);
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.page-btn-pause {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-family: inherit;
+  font-size: 9px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.2s;
+  min-width: 20px;
+  text-align: center;
+}
+
+.page-btn-pause:hover { border-color: var(--warn); color: var(--warn); }
+.page-btn-pause.paused { border-color: var(--warn); color: var(--warn); }
 
 /* === CAROUSEL === */
 
@@ -103,6 +154,13 @@ html, body {
   opacity: 0;
   transform: translateX(-30px);
 }
+
+/* Allow scrolling on active pages for responsive layouts */
+.page.active {
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.page.active::-webkit-scrollbar { display: none; }
 
 /* === TICKER === */
 
@@ -140,6 +198,7 @@ html, body {
   border-top: 1px solid var(--border);
   padding-top: 2px;
   overflow: hidden;
+  flex-wrap: wrap;
 }
 
 .ftr-stats {
@@ -172,7 +231,7 @@ html, body {
   box-shadow: 0 0 6px rgba(124, 248, 247, 0.4);
 }
 
-/* Paused indicator: active dot pulses slowly to show rotation is stopped */
+/* Paused indicator */
 .page-dots.paused .dot.active {
   animation: dot-paused 2s ease-in-out infinite;
 }
@@ -182,10 +241,50 @@ html, body {
   50% { opacity: 0.3; }
 }
 
-/* Page label shows PAUSED state */
 .page-label.paused::after {
   content: ' ||';
   color: var(--dim);
   font-size: 7px;
   letter-spacing: 0;
+}
+
+/* === RESPONSIVE === */
+
+/* Screens wider than the kiosk: show nav buttons, scale up slightly */
+@media (min-width: 801px) {
+  html, body { font-size: 12px; }
+
+  .page-nav-buttons { display: flex; }
+
+  /* Hide dots on web -- buttons replace them */
+  .page-dots { display: none; }
+
+  .shell { padding: 8px 12px; gap: 6px; }
+
+  .hdr { padding-bottom: 4px; }
+
+  .logo { font-size: 16px; }
+
+  .page.active { overflow-y: auto; }
+}
+
+/* Tablets (768-1024) */
+@media (min-width: 768px) and (max-width: 1024px) {
+  html, body { font-size: 11px; }
+}
+
+/* Large screens */
+@media (min-width: 1200px) {
+  html, body { font-size: 13px; }
+  .shell { max-width: 1400px; margin: 0 auto; padding: 12px 20px; }
+}
+
+/* Small screens (phones) */
+@media (max-width: 600px) {
+  html, body { font-size: 10px; }
+  .shell { padding: 2px 4px; gap: 2px; }
+  .logo { font-size: 12px; letter-spacing: 3px; }
+  .hdr-r { gap: 6px; font-size: 9px; }
+  .clock { font-size: 11px; }
+  .ftr-stats { gap: 6px; font-size: 8px; }
 }
