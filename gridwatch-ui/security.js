@@ -131,26 +131,24 @@ function updateSecurityPage(healthMap) {
   }
 
   html += '<div class="soc-feed">';
-  html += '<div class="soc-feed-hdr">LIVE FEED</div>';
+  html += '<div class="soc-feed-hdr">LIVE FEED <span class="soc-feed-count">' + feedEvents.length + ' events</span></div>';
   if (feedEvents.length === 0) {
     html += '<div class="soc-feed-empty">Monitoring active -- no events to display</div>';
   } else {
     html += '<div class="soc-feed-list">';
-    // Show most recent events (deduplicated by text, max 12)
-    const seen = new Set();
+    // Show all events, no dedup -- you want to see the actual flow
     let shown = 0;
     for (const fe of feedEvents) {
-      if (shown >= 12) break;
-      const key = fe.machine + fe.text;
-      if (seen.has(key)) continue;
-      seen.add(key);
+      if (shown >= 30) break;
 
       const { severity, text } = parseSev(fe.text);
       const sevClass = severity === 'critical' ? 'crit' : severity === 'warn' ? 'warn' : 'info';
       const name = secName(fe.machine);
+      const ago = fe.time ? secTimeAgo(fe.time) : '';
 
-      html += `<div class="soc-feed-row">`;
-      html += `<span class="soc-feed-sev ${sevClass}">${severity.toUpperCase()}</span>`;
+      html += `<div class="soc-feed-row ${sevClass}">`;
+      if (ago) html += `<span class="soc-feed-ago">${ago}</span>`;
+      html += `<span class="soc-feed-sev ${sevClass}">${severity === 'critical' ? 'CRIT' : severity === 'warn' ? 'WARN' : 'INFO'}</span>`;
       html += `<span class="soc-feed-machine">${name}</span>`;
       html += `<span class="soc-feed-text">${esc(text)}</span>`;
       html += `</div>`;
