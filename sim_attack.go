@@ -62,8 +62,14 @@ func runSimAttack(args []string) error {
 			return fmt.Errorf("lateral-movement requires two targets: --target=machine1,machine2")
 		}
 		return simLateralMovement(sc.targets[0], sc.targets[1], sc.dryRun)
+	case "ssh-key-swap":
+		return simSSHKeySwap(sc.targets[0], sc.dryRun)
+	case "cron-persistence":
+		return simCronPersistence(sc.targets[0], sc.dryRun)
+	case "config-tamper":
+		return simConfigTamper(sc.targets[0], sc.dryRun)
 	default:
-		return fmt.Errorf("unknown scenario: %s\nAvailable: brute-force, credential-theft, binary-tamper, rogue-service, lateral-movement, --all", sc.scenario)
+		return fmt.Errorf("unknown scenario: %s\nAvailable: brute-force, credential-theft, binary-tamper, rogue-service, lateral-movement, ssh-key-swap, cron-persistence, config-tamper, --all", sc.scenario)
 	}
 }
 
@@ -505,6 +511,143 @@ func simLateralMovement(target1, target2 string, dryRun bool) error {
 	return nil
 }
 
+// simSSHKeySwap: attacker adds their key to authorized_keys
+func simSSHKeySwap(target string, dryRun bool) error {
+	fmt.Printf("=== SIM: SSH Key Injection on %s ===\n", target)
+
+	// Step 1: Append a fake key to authorized_keys
+	fakeKey := `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA sim-attack-test@fake`
+	cmd := fmt.Sprintf(`mkdir -p ~/.ssh && echo '%s' >> ~/.ssh/authorized_keys`, fakeKey)
+	fmt.Println("  Injecting fake SSH key into authorized_keys...")
+	if dryRun {
+		fmt.Printf("  [DRY-RUN] SSH %s: %s\n", target, cmd)
+	} else {
+		if _, err := simSSH(target, cmd); err != nil {
+			log.Printf("  Warning: key injection failed: %v", err)
+		}
+	}
+
+	// Step 2: Wait for FIM detection (rule 100102, level 10 = critical)
+	pass := false
+	if dryRun {
+		fmt.Println("  [DRY-RUN] SKIP: would wait up to 180s for FIM detection")
+	} else {
+		fmt.Println("  Waiting for FIM detection (up to 180s)...")
+		pass = simWaitForHealth(target, func(h *MachineHealth) bool {
+			return h.Score >= 10 // Level 10 = critical = +10 score
+		}, 180*time.Second)
+		if pass {
+			health := simFetchHealth()
+			if h, ok := health[target]; ok {
+				fmt.Printf("  Detected: score=%d status=%s last_event=%s\n", h.Score, h.Status, h.LastEventDesc)
+			}
+		}
+	}
+
+	// Step 3: Cleanup -- remove the fake key
+	fmt.Println("  Cleaning up...")
+	cleanupCmd := `sed -i '/sim-attack-test@fake/d' ~/.ssh/authorized_keys 2>/dev/null || true`
+	if dryRun {
+		fmt.Printf("  [DRY-RUN] SSH %s: %s\n", target, cleanupCmd)
+		fmt.Println("  [DRY-RUN] Result: SKIP")
+	} else {
+		simSSH(target, cleanupCmd)
+		simUnquarantine(target)
+		simPrintResult("ssh-key-swap", pass, fmt.Sprintf("target=%s", target))
+	}
+	return nil
+}
+
+// simCronPersistence: attacker installs a cron job for persistence
+func simCronPersistence(target string, dryRun bool) error {
+	fmt.Printf("=== SIM: Cron Persistence on %s ===\n", target)
+
+	// Step 1: Create a fake cron entry
+	cmd := `(crontab -l 2>/dev/null; echo '# sim-attack-test'; echo '*/5 * * * * echo sim-persistence > /dev/null') | crontab -`
+	fmt.Println("  Installing fake cron job...")
+	if dryRun {
+		fmt.Printf("  [DRY-RUN] SSH %s: %s\n", target, cmd)
+	} else {
+		if _, err := simSSH(target, cmd); err != nil {
+			log.Printf("  Warning: cron install failed: %v", err)
+		}
+	}
+
+	// Step 2: Wait for detection (crontab changes may be picked up by syscheck or auditd)
+	pass := false
+	if dryRun {
+		fmt.Println("  [DRY-RUN] SKIP: would wait up to 120s for detection")
+	} else {
+		fmt.Println("  Waiting for detection (up to 120s)...")
+		pass = simWaitForHealth(target, func(h *MachineHealth) bool {
+			return h.Score > 0
+		}, 120*time.Second)
+		if pass {
+			health := simFetchHealth()
+			if h, ok := health[target]; ok {
+				fmt.Printf("  Detected: score=%d status=%s last_event=%s\n", h.Score, h.Status, h.LastEventDesc)
+			}
+		}
+	}
+
+	// Step 3: Cleanup
+	fmt.Println("  Cleaning up...")
+	cleanupCmd := `crontab -l 2>/dev/null | grep -v 'sim-attack-test' | grep -v 'sim-persistence' | crontab - 2>/dev/null || true`
+	if dryRun {
+		fmt.Printf("  [DRY-RUN] SSH %s: %s\n", target, cleanupCmd)
+		fmt.Println("  [DRY-RUN] Result: SKIP")
+	} else {
+		simSSH(target, cleanupCmd)
+		simPrintResult("cron-persistence", pass, fmt.Sprintf("target=%s", target))
+	}
+	return nil
+}
+
+// simConfigTamper: attacker modifies claude-peers config
+func simConfigTamper(target string, dryRun bool) error {
+	fmt.Printf("=== SIM: Config Tamper on %s ===\n", target)
+
+	// Step 1: Append a harmless comment to config.json (modifies but doesn't break it)
+	cmd := `cp ~/.config/claude-peers/config.json ~/.config/claude-peers/config.json.sim-backup && echo '  ' >> ~/.config/claude-peers/config.json`
+	fmt.Println("  Tampering with claude-peers config...")
+	if dryRun {
+		fmt.Printf("  [DRY-RUN] SSH %s: %s\n", target, cmd)
+	} else {
+		if _, err := simSSH(target, cmd); err != nil {
+			log.Printf("  Warning: config tamper failed: %v", err)
+		}
+	}
+
+	// Step 2: Wait for FIM detection (config dir is realtime monitored)
+	pass := false
+	if dryRun {
+		fmt.Println("  [DRY-RUN] SKIP: would wait up to 120s for FIM detection")
+	} else {
+		fmt.Println("  Waiting for FIM detection (up to 120s)...")
+		pass = simWaitForHealth(target, func(h *MachineHealth) bool {
+			return h.Score > 0
+		}, 120*time.Second)
+		if pass {
+			health := simFetchHealth()
+			if h, ok := health[target]; ok {
+				fmt.Printf("  Detected: score=%d status=%s last_event=%s\n", h.Score, h.Status, h.LastEventDesc)
+			}
+		}
+	}
+
+	// Step 3: Cleanup -- restore original config
+	fmt.Println("  Cleaning up...")
+	cleanupCmd := `mv ~/.config/claude-peers/config.json.sim-backup ~/.config/claude-peers/config.json 2>/dev/null || true`
+	if dryRun {
+		fmt.Printf("  [DRY-RUN] SSH %s: %s\n", target, cleanupCmd)
+		fmt.Println("  [DRY-RUN] Result: SKIP")
+	} else {
+		simSSH(target, cleanupCmd)
+		simPrintResult("config-tamper", pass, fmt.Sprintf("target=%s", target))
+	}
+	return nil
+}
+
 func simRunAll(sc *simConfig) error {
 	target := sc.targets[0]
 	dryRun := sc.dryRun
@@ -517,6 +660,9 @@ func simRunAll(sc *simConfig) error {
 		{"credential-theft", simCredentialTheft},
 		{"binary-tamper", simBinaryTamper},
 		{"rogue-service", simRogueService},
+		{"ssh-key-swap", simSSHKeySwap},
+		{"cron-persistence", simCronPersistence},
+		{"config-tamper", simConfigTamper},
 	}
 
 	fmt.Printf("=== Running all scenarios on %s ===\n\n", target)
