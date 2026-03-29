@@ -265,6 +265,16 @@ func severityFromLevel(level int) string {
 	}
 }
 
+// normalizeAgentName maps Wazuh agent names to fleet machine names.
+func normalizeAgentName(name string) string {
+	// The manager's own alerts use "wazuh.manager" -- map to actual hostname.
+	if name == "wazuh.manager" {
+		return cfg.MachineName
+	}
+	// Strip .local suffix from macOS agents.
+	return strings.TrimSuffix(name, ".local")
+}
+
 // alertToSecurityEvent converts a WazuhAlert into a SecurityEvent.
 func alertToSecurityEvent(alert WazuhAlert) SecurityEvent {
 	_, secType := classifyAlert(alert)
@@ -272,7 +282,7 @@ func alertToSecurityEvent(alert WazuhAlert) SecurityEvent {
 		Type:        secType,
 		Severity:    severityFromLevel(alert.Rule.Level),
 		Level:       alert.Rule.Level,
-		Machine:     alert.Agent.Name,
+		Machine:     normalizeAgentName(alert.Agent.Name),
 		AgentID:     alert.Agent.ID,
 		RuleID:      alert.Rule.ID,
 		Description: alert.Rule.Description,
