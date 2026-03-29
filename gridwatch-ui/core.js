@@ -70,10 +70,6 @@ function goToPage(idx) {
 
   setTimeout(() => pages[prev].classList.remove('exit-left'), 450);
 
-  // Start/stop peer graph canvas animation based on page visibility.
-  if (idx === PAGE_LABELS.indexOf('PEERS')) startPeerGraph();
-  else stopPeerGraph();
-
   if (autoRotate) resetRotateTimer();
   updatePauseIndicator();
 }
