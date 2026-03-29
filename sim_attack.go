@@ -79,6 +79,8 @@ func parseSimArgs(args []string) (*simConfig, error) {
 			sc.targets = strings.Split(strings.TrimPrefix(arg, "--target="), ",")
 		case arg == "--dry-run":
 			sc.dryRun = true
+		case arg == "--all":
+			positional = append(positional, "--all")
 		case strings.HasPrefix(arg, "-"):
 			return nil, fmt.Errorf("unknown flag: %s", arg)
 		default:
