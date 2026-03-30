@@ -56,40 +56,39 @@ func main() {
 		cliDream()
 	case "dream-watch":
 		cliDreamWatch()
-	case "supervisor":
-		cliSupervisor(ctx)
-	case "gridwatch":
-		if err := runGridwatch(ctx); err != nil {
-			log.Fatal(err)
-		}
 	case "issue-token":
 		cliIssueToken(os.Args[2:])
-	case "save-token":
-		cliSaveToken(os.Args[2:])
-	case "wazuh-bridge":
-		if err := runWazuhBridge(ctx); err != nil {
-			log.Fatal(err)
-		}
-	case "unquarantine":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: claude-peers unquarantine <machine>")
+	case "mint-root":
+		kp, err := LoadKeyPair(configDir())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading keypair: %v\n", err)
 			os.Exit(1)
 		}
-		cliUnquarantine(os.Args[2])
-	case "security-watch":
-		if err := runSecurityWatch(ctx); err != nil {
-			log.Fatal(err)
+		token, err := MintRootToken(kp.PrivateKey, AllCapabilities(), 365*24*time.Hour)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error minting root token: %v\n", err)
+			os.Exit(1)
 		}
-	case "response-daemon":
-		if err := runResponseDaemon(ctx); err != nil {
-			log.Fatal(err)
+		if err := SaveRootToken(token, configDir()); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving root token: %v\n", err)
+			os.Exit(1)
 		}
-	case "sim-attack":
-		if err := runSimAttack(os.Args[2:]); err != nil {
-			log.Fatal(err)
+		// Also save as peer token for the broker's own use
+		if err := SaveToken(token, configDir()); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving token: %v\n", err)
+			os.Exit(1)
 		}
+		fmt.Println("Root token minted and saved")
+	case "save-token":
+		cliSaveToken(os.Args[2:])
+	case "refresh-token":
+		cliRefreshToken()
+	case "generate-nkey":
+		cliGenerateNKey()
 	case "kill-broker":
 		cliKillBroker()
+	case "reauth-fleet":
+		cliReauthFleet()
 	default:
 		printUsage()
 		os.Exit(1)
@@ -109,19 +108,13 @@ Usage:
   claude-peers send <id> <msg>                  Send a message to a peer
   claude-peers issue-token <pub-path> <role>    Issue a UCAN token for a machine
   claude-peers save-token <jwt>                 Save a UCAN token locally
+  claude-peers refresh-token                    Renew current token (auto-refreshes with broker)
+  claude-peers mint-root                        Mint a new root token (broker only)
   claude-peers dream                            Snapshot fleet state to Claude memory
   claude-peers dream-watch                      Watch fleet via NATS and keep memory fresh
-  claude-peers supervisor                       Run daemon supervisor (manages agent workflows)
-  claude-peers gridwatch                        Start fleet health dashboard (reads gridwatch.json)
-  claude-peers wazuh-bridge                     Tail Wazuh alerts and publish to NATS
-  claude-peers unquarantine <machine>           Remove quarantine from a machine
-  claude-peers security-watch                   Correlate security events and alert
-  claude-peers response-daemon                  Automated incident response (forensics, IP blocks, email)
-  claude-peers sim-attack <scenario> [flags]    Simulate attack scenarios to test detection + response
+  claude-peers generate-nkey                    Generate a NATS NKey pair for per-machine auth
   claude-peers kill-broker                      Stop the broker daemon
-
-Sim-attack scenarios: brute-force, credential-theft, binary-tamper, rogue-service, lateral-movement, --all
-Sim-attack flags: --target=machine (default: raspdeck), --dry-run
+  claude-peers reauth-fleet                     Re-issue tokens for all fleet machines via SSH
 
 Token roles: peer-session, fleet-read, fleet-write, cli
 
@@ -139,6 +132,21 @@ Setup:
 }
 
 func cliFetch(path string, body any, result any) error {
+	err := cliFetchOnce(path, body, result)
+	if err == nil {
+		return nil
+	}
+
+	// Auto-refresh on TOKEN_EXPIRED: try once to get a new token then retry.
+	if strings.Contains(err.Error(), "TOKEN_EXPIRED") || strings.Contains(err.Error(), "token expired") {
+		if refreshErr := doRefreshToken(); refreshErr == nil {
+			return cliFetchOnce(path, body, result)
+		}
+	}
+	return err
+}
+
+func cliFetchOnce(path string, body any, result any) error {
 	data, _ := json.Marshal(body)
 	client := http.Client{Timeout: 3 * time.Second}
 
@@ -168,6 +176,76 @@ func cliFetch(path string, body any, result any) error {
 	return nil
 }
 
+// doRefreshToken calls /refresh-token, saves the new JWT, and updates authToken.
+func doRefreshToken() error {
+	current := authToken
+	if current == "" {
+		var err error
+		current, err = LoadToken(configDir())
+		if err != nil {
+			return fmt.Errorf("no token to refresh: %w", err)
+		}
+	}
+
+	data, _ := json.Marshal(map[string]string{})
+	client := http.Client{Timeout: 5 * time.Second}
+	req, _ := http.NewRequest("POST", cfg.BrokerURL+"/refresh-token", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+current)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("refresh request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("refresh failed (%d): %s", resp.StatusCode, string(b))
+	}
+
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(b, &result); err != nil {
+		return fmt.Errorf("decode refresh response: %w", err)
+	}
+	if result.Token == "" {
+		return fmt.Errorf("broker returned empty token")
+	}
+
+	if err := SaveToken(result.Token, configDir()); err != nil {
+		return fmt.Errorf("save refreshed token: %w", err)
+	}
+	authToken = result.Token
+	return nil
+}
+
+func cliRefreshToken() {
+	if err := doRefreshToken(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Token refreshed and saved to %s\n", filepath.Join(configDir(), tokenFile))
+	if claims, err := func() (*UCANClaims, error) {
+		t, err := LoadToken(configDir())
+		if err != nil {
+			return nil, err
+		}
+		rootPubPath := filepath.Join(configDir(), rootPubKeyFile)
+		rootPub, err := LoadPublicKey(rootPubPath)
+		if err != nil {
+			return nil, err
+		}
+		v := NewTokenValidator(rootPub)
+		return v.Validate(t)
+	}(); err == nil {
+		if claims.ExpiresAt != nil {
+			fmt.Printf("New expiry: %s\n", claims.ExpiresAt.Time.Format(time.RFC3339))
+		}
+	}
+}
+
 func cliShowConfig() {
 	fmt.Printf("Config: %s\n\n", configPath())
 	fmt.Printf("  role:         %s\n", cfg.Role)
@@ -192,12 +270,13 @@ func cliStatus() {
 		cliFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers)
 		fmt.Println("\nPeers:")
 		for _, p := range peers {
-			fmt.Printf("  %s  [%s]  PID:%d  %s\n", p.ID, p.Machine, p.PID, p.CWD)
+			displayName := p.Name
+			if displayName == "" {
+				displayName = p.ID
+			}
+			fmt.Printf("  %s on %s (id: %s)  PID:%d  %s\n", displayName, p.Machine, p.ID, p.PID, p.CWD)
 			if p.Summary != "" {
 				fmt.Printf("         %s\n", p.Summary)
-			}
-			if p.TTY != "" {
-				fmt.Printf("         TTY: %s\n", p.TTY)
 			}
 			fmt.Printf("         Last seen: %s\n", p.LastSeen)
 		}
@@ -215,7 +294,11 @@ func cliPeers() {
 		return
 	}
 	for _, p := range peers {
-		fmt.Printf("%s  [%s]  PID:%d  %s\n", p.ID, p.Machine, p.PID, p.CWD)
+		displayName := p.Name
+		if displayName == "" {
+			displayName = p.ID
+		}
+		fmt.Printf("%s on %s (id: %s)  PID:%d  %s\n", displayName, p.Machine, p.ID, p.PID, p.CWD)
 		if p.Summary != "" {
 			fmt.Printf("  Summary: %s\n", p.Summary)
 		}
@@ -271,10 +354,14 @@ func cliIssueToken(args []string) {
 		os.Exit(1)
 	}
 
-	parentToken, err := LoadToken(configDir())
+	parentToken, err := LoadRootToken(configDir())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading broker token: %v\n", err)
-		os.Exit(1)
+		// Fallback to token.jwt for backward compat with existing installs.
+		parentToken, err = LoadToken(configDir())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading broker root token: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	targetPub, err := LoadPublicKey(pubPath)
@@ -336,15 +423,6 @@ func cliSaveToken(args []string) {
 	}
 }
 
-func cliUnquarantine(machine string) {
-	var resp map[string]bool
-	if err := cliFetch("/unquarantine", map[string]string{"machine": machine}, &resp); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("Machine %s unquarantined\n", machine)
-}
-
 func cliKillBroker() {
 	var health HealthResponse
 	if err := cliFetch("/health", nil, &health); err != nil {
@@ -371,14 +449,20 @@ func cliKillBroker() {
 	fmt.Println("Broker stopped.")
 }
 
+// cliReauthFleet re-issues peer-session tokens for fleet machines via SSH.
+// Configure SSH targets in your SSH config or pass them as arguments.
+func cliReauthFleet() {
+	fmt.Println("reauth-fleet: Configure SSH targets in your SSH config.")
+	fmt.Println("For each machine:")
+	fmt.Println("  1. scp <machine>:~/.config/claude-peers/identity.pub /tmp/machine.pub")
+	fmt.Println("  2. claude-peers issue-token /tmp/machine.pub peer-session")
+	fmt.Println("  3. ssh <machine> 'claude-peers save-token <jwt>'")
+}
+
 func execOutput(name string, args ...string) (string, error) {
 	var buf bytes.Buffer
-	cmd := execCommand(name, args...)
+	cmd := exec.Command(name, args...)
 	cmd.Stdout = &buf
 	err := cmd.Run()
 	return buf.String(), err
-}
-
-func execCommand(name string, args ...string) *exec.Cmd {
-	return exec.Command(name, args...)
 }

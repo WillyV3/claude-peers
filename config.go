@@ -9,7 +9,7 @@ import (
 )
 
 // Config holds all runtime configuration for claude-peers.
-// Loaded once at startup from file → env overrides → defaults.
+// Loaded once at startup from file -> env overrides -> defaults.
 type Config struct {
 	// Role determines whether this instance runs a broker or connects to one.
 	// "broker" = run the HTTP broker daemon locally.
@@ -40,30 +40,21 @@ type Config struct {
 	// NatsURL is the NATS server address. Defaults to deriving from BrokerURL.
 	NatsURL string `json:"nats_url"`
 
-	// DaemonDir is the directory containing daemon definitions.
-	// Defaults to ./daemons or ~/claude-peers-daemons.
-	DaemonDir string `json:"daemon_dir"`
+	// NatsToken is the auth token for NATS server connections.
+	NatsToken string `json:"nats_token"`
 
-	// AgentBin is the path to the vinayprograms/agent binary.
-	// Defaults to searching PATH, then ~/projects/vinay-agent/bin/agent.
-	AgentBin string `json:"agent_bin"`
+	// NatsNKeySeed is the path to a NATS NKey seed file for per-machine auth.
+	// Takes priority over NatsToken when set.
+	NatsNKeySeed string `json:"nats_nkey_seed"`
 
-	// LLMBaseURL is the OpenAI-compatible LLM endpoint for daemons.
-	// Defaults to http://127.0.0.1:4000/v1.
+	// LLMBaseURL is the OpenAI-compatible LLM endpoint for auto-summary generation.
 	LLMBaseURL string `json:"llm_base_url"`
 
-	// LLMModel is the default model for daemon workflows.
+	// LLMModel is the default model for summary generation.
 	LLMModel string `json:"llm_model"`
 
 	// LLMAPIKey is the API key for the LLM endpoint (used for summary generation).
 	LLMAPIKey string `json:"llm_api_key"`
-
-	// NatsToken is the auth token for NATS server connections.
-	NatsToken string `json:"nats_token"`
-
-	// WazuhAlertsPath is the path to Wazuh's alerts.json log file.
-	// Used by the wazuh-bridge subcommand.
-	WazuhAlertsPath string `json:"wazuh_alerts_path"`
 }
 
 // cfg is the global config, loaded once at startup.
@@ -97,12 +88,6 @@ func loadConfig() Config {
 	if v := os.Getenv("CLAUDE_PEERS_NATS"); v != "" {
 		c.NatsURL = v
 	}
-	if v := os.Getenv("CLAUDE_PEERS_DAEMONS"); v != "" {
-		c.DaemonDir = v
-	}
-	if v := os.Getenv("AGENT_BIN"); v != "" {
-		c.AgentBin = v
-	}
 	if v := os.Getenv("CLAUDE_PEERS_LLM_URL"); v != "" {
 		c.LLMBaseURL = v
 	}
@@ -115,8 +100,8 @@ func loadConfig() Config {
 	if v := os.Getenv("CLAUDE_PEERS_LLM_API_KEY"); v != "" {
 		c.LLMAPIKey = v
 	}
-	if v := os.Getenv("WAZUH_ALERTS_PATH"); v != "" {
-		c.WazuhAlertsPath = v
+	if v := os.Getenv("CLAUDE_PEERS_NATS_NKEY"); v != "" {
+		c.NatsNKeySeed = v
 	}
 
 	// Legacy env var
@@ -140,10 +125,8 @@ func defaultConfig() Config {
 		DBPath:       defaultDBPath(),
 		StaleTimeout: 300,
 		NatsURL:      "",
-		DaemonDir:    "",
-		AgentBin:     "",
 		LLMBaseURL:   "http://127.0.0.1:4000/v1",
-		LLMModel:     "vertex_ai/claude-sonnet-4-6",
+		LLMModel:     "claude-haiku",
 	}
 }
 
@@ -219,6 +202,11 @@ Examples:
 			fmt.Fprintf(os.Stderr, "Error minting root token: %v\n", err)
 			os.Exit(1)
 		}
+		if err := SaveRootToken(token, dir); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving root token: %v\n", err)
+			os.Exit(1)
+		}
+		// Also save to token.jwt for backward compat (broker uses root token as its own auth).
 		if err := SaveToken(token, dir); err != nil {
 			fmt.Fprintf(os.Stderr, "Error saving token: %v\n", err)
 			os.Exit(1)
@@ -261,6 +249,7 @@ Examples:
 	fmt.Printf("  public key:   %s\n", filepath.Join(dir, publicKeyFile))
 	if c.Role == "broker" {
 		fmt.Printf("  root.pub:     %s\n", filepath.Join(dir, rootPubKeyFile))
+		fmt.Printf("  root token:   %s\n", filepath.Join(dir, rootTokenFile))
 		fmt.Printf("  token:        %s\n", filepath.Join(dir, tokenFile))
 		fmt.Printf("  listen:       %s\n", c.Listen)
 		fmt.Printf("  db_path:      %s\n", c.DBPath)

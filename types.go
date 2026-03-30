@@ -10,7 +10,7 @@ type Peer struct {
 	CWD          string `json:"cwd"`
 	GitRoot      string `json:"git_root"`
 	TTY          string `json:"tty"`
-	Name         string `json:"name"`    // auto-generated: machine/project
+	Name         string `json:"name"`    // auto-generated: repo@branch or dir-basename
 	Project      string `json:"project"` // repo or directory name
 	Branch       string `json:"branch"`  // git branch
 	Summary      string `json:"summary"`
@@ -53,6 +53,11 @@ type HeartbeatRequest struct {
 type SetSummaryRequest struct {
 	ID      string `json:"id"`
 	Summary string `json:"summary"`
+}
+
+type SetNameRequest struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type ListPeersRequest struct {
@@ -100,6 +105,18 @@ type Event struct {
 	Machine   string `json:"machine"`
 	Data      string `json:"data"`
 	CreatedAt string `json:"created_at"`
+}
+
+// ChallengeRequest is sent by a client to verify the broker's identity.
+type ChallengeRequest struct {
+	Nonce string `json:"nonce"`
+}
+
+// ChallengeResponse is the broker's signed proof of identity.
+type ChallengeResponse struct {
+	Nonce     string `json:"nonce"`
+	Signature string `json:"signature"`  // base64url-encoded Ed25519 signature
+	PublicKey string `json:"public_key"` // base64url-encoded public key
 }
 
 func nowISO() string {

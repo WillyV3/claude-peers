@@ -1,5 +1,5 @@
 claude-peers
-claude-peers-*
-package/
-*.tgz
-deploy.conf
+claude-peers-go
+*.db
+*.db-wal
+*.db-shm

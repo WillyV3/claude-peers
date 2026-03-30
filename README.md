@@ -1,158 +1,39 @@
-# Sontara Lattice
+# claude-peers-go
 
-A Claude-native fleet platform. Run Claude Code sessions and autonomous Claude daemons across physical machines with cryptographic trust, scoped capabilities, continuous security monitoring, and real-time observability. Single Go binary, runs on anything from a Pi Zero to a rack server.
+Peer discovery and messaging for Claude Code instances across machines.
 
-## What this is
+## What it does
 
-Your Claude Code instances talk to each other, run autonomous background daemons, and operate as a trusted fleet. Every session and daemon gets an Ed25519 identity and a capability-scoped token. The trust broker validates every action. Wazuh EDR monitors every endpoint. Compromised machines get quarantined automatically. You see it all on a real-time dashboard.
-
-This is not a framework or a spec. It's running in production on a 7-machine Tailscale mesh with Claude Code sessions coordinating across Arch, Ubuntu, Debian, and macOS -- including a Raspberry Pi cyberdeck that carries the fleet in a backpack.
-
-Built on: **Claude Code** + **UCAN capability tokens** + **NATS JetStream** + **Wazuh EDR** + **Ed25519 identity**
-
-## Architecture
-
-![Architecture](assets/architecture.png)
-
-![Fleet Deployment](assets/deployment.png)
-
-![Trust Flow](assets/trust-flow.png)
-
-Every participant in the lattice gets:
-- **Identity**: Ed25519 keypair (hardware-backed where available -- TPM, Secure Enclave)
-- **Capabilities**: UCAN JWT token scoped to exactly the broker endpoints it needs, delegated from a root of trust with attenuation enforcement
-- **Policy**: Guardrails on tools, paths, and actions (for daemons)
-- **Coordination**: NATS pub/sub for event-driven communication across machines
-- **Monitoring**: Wazuh file integrity, auth log analysis, process monitoring
-- **Dynamic trust**: Health score degrades on security events -- capabilities get restricted or revoked automatically
-
-## Core Components
-
-### Trust Broker
-HTTP API server that manages peer registration, messaging, fleet state, and UCAN token validation. Every request requires a capability-scoped JWT. The broker maintains per-machine health scores and enforces trust demotion.
-
-### UCAN Capability Auth
-Ed25519+JWT tokens with embedded capabilities and delegation chains. A root key signs tokens for each machine/service, scoped to exactly the endpoints they need. Child tokens can only have a subset of their parent's capabilities (attenuation). Tokens expire, are cryptographically verifiable without server round-trips, and chain back to a single root of trust.
-
-**Capability resources:**
-| Resource | What it gates |
-|----------|--------------|
-| `peer/register` | Register as a peer |
-| `peer/heartbeat` | Keep-alive |
-| `peer/list` | Discover other peers |
-| `msg/send` | Send messages |
-| `msg/poll` | Receive messages |
-| `events/read` | Read fleet events |
-| `memory/read` | Read fleet memory |
-| `memory/write` | Write fleet memory |
-
-**Pre-defined roles:**
-| Role | Capabilities |
-|------|-------------|
-| `peer-session` | Full peer interaction (register, message, list, events) |
-| `fleet-read` | Read-only fleet access (list, events, memory read) |
-| `fleet-write` | Fleet read + memory write |
-| `cli` | List peers, send messages, read events |
-
-### Wazuh EDR Bridge
-Tails Wazuh's `alerts.json`, classifies security events by type (file integrity, auth, process, network), and publishes to NATS `fleet.security.*` subjects. The broker subscribes and updates machine health scores:
-
-| Alert Level | Severity | Trust Impact |
-|-------------|----------|-------------|
-| 1-5 | Info | Log only |
-| 6-9 | Warning | Health score +1 |
-| 10-12 | Critical | Health score +10, capabilities demoted |
-| 13-15 | Quarantine | All capabilities revoked |
-
-Health scores decay over time. Quarantine requires manual recovery.
-
-Custom Wazuh rules detect:
-- Claude-peers binary tampering (level 13)
-- UCAN credential file modification (level 12)
-- SSH key changes (level 10)
-- Systemd unit file changes (level 9)
-
-### Daemon Supervisor
-Manages autonomous agent workflows. Each daemon is defined by:
-- `.agent` file: The agent's prompt and goals (Agentfile DSL)
-- `daemon.json`: Schedule (interval, event-triggered, or cron)
-- `agent.toml`: LLM provider config
-- `policy.toml`: Tool allowlists, path restrictions, safety constraints
-- `triage.sh`: Optional gate script (exit 0 = run, exit 1 = skip)
-
-**Built-in daemons:**
-| Daemon | Schedule | What it does |
-|--------|----------|-------------|
-| fleet-scout | 10m | Monitors fleet health across all machines and services |
-| fleet-memory | 10m | Consolidate fleet activity into shared Claude memory |
-| llm-watchdog | 10m | Monitor LLM server health, restart if down, alert on anomalies |
-| pr-helper | 15m | Keep PRs mergeable across GitHub orgs (Human-Frontier-Labs-Inc, WillyV3) |
-| sync-janitor | 15m | Detect Syncthing conflict files, analyze them, and email a resolution report |
-| fleet-digest | 60m | Hourly fleet digest email -- daemons, security, peers, machine health |
-| librarian | 3h | Audit and update documentation across fleet machines |
-
-Daemons have EDR-aware triage gates. `pr-helper` and `sync-janitor` refuse to run when the local machine is quarantined. `fleet-scout` and `librarian` always run but escalate their output when machines are unhealthy. `fleet-digest` and `llm-watchdog` are unconditional pass-throughs. See [Daemon Guide](docs/DAEMON-GUIDE.md#edr-aware-triage) for full per-daemon triage behavior.
-
-### Security Watch
-Long-running correlator that subscribes to `fleet.security.>` events and detects:
-- **Distributed attacks**: Same rule ID firing on 3+ machines within 5 minutes
-- **Brute force**: 5+ auth failures from same machine within 10 minutes
-- **Credential theft**: FIM event on identity.pem/token.jwt + peer registration within 5 minutes
-
-Escalates to quarantine and emails alerts on detection.
-
-### Gridwatch Dashboard
-6-page real-time kiosk dashboard:
-1. **Fleet**: Machine tiles with CPU/RAM/disk, live Claude agents, LLM status
-2. **Services**: Docker, Syncthing, systemd, Cloudflare tunnel monitoring
-3. **NATS**: JetStream stats, connections, consumers, message flow
-4. **Agents**: Daemon status cards with run history, sparklines, output
-5. **Peers**: Constellation network graph of the agent mesh
-6. **Security**: Per-machine Wazuh EDR status, health scores, quarantine state
-
-Embedded in the binary. Serves on any port. Auto-rotates pages.
-
-### Fleet Memory (Dream)
-Consolidates fleet activity into Claude-compatible memory files. Peers fetch fleet state on startup so every Claude session knows what's happening across the mesh. Updated via NATS events or periodic polling.
-
-### Claude Peers (MCP Server)
-The foundational layer. Every Claude Code session runs an MCP server that registers with the broker, discovers other sessions across machines, and exchanges messages in real-time via JSON-RPC channel notifications. Sessions auto-generate LLM summaries of their current work. Peers see each other's machine, project, branch, TTY, and summary. Messages arrive instantly -- no polling on the Claude side.
-
-This is what makes Claude Code sessions aware of each other. Everything else in the lattice builds on this.
+- Claude Code sessions automatically discover each other across your network
+- Send messages between sessions in real time
+- See what each Claude instance is working on (auto-generated summaries)
+- UCAN-based cryptographic authentication (Ed25519 + JWT delegation chains)
+- NATS JetStream for real-time event streaming (optional, falls back to HTTP polling)
+- Fleet memory: shared markdown state synced across all machines
 
 ## Quick Start
 
-### 1. Initialize the broker
-
-On your always-on server:
+### 1. Set up the broker (on your always-on server)
 
 ```bash
+go install github.com/WillyV3/claude-peers-go@latest
+
 claude-peers init broker
 claude-peers broker
 ```
 
-This generates an Ed25519 root keypair and a self-signed UCAN root token.
-
-### 2. Set up client machines
-
-On each machine:
+### 2. Set up each client machine
 
 ```bash
 claude-peers init client http://<broker-ip>:7899
 ```
 
-Copy `root.pub` from the broker to `~/.config/claude-peers/root.pub` on the client.
+Copy `root.pub` from the broker machine to `~/.config/claude-peers/root.pub` on the client.
 
-### 3. Issue capability tokens
-
-On the broker machine:
+On the broker, issue a token for the client:
 
 ```bash
-# Issue a peer-session token for a client
 claude-peers issue-token /path/to/client-identity.pub peer-session
-
-# Issue a fleet-write token for dream/supervisor
-claude-peers issue-token /path/to/service-identity.pub fleet-write
 ```
 
 On the client, save the issued token:
@@ -161,141 +42,100 @@ On the client, save the issued token:
 claude-peers save-token <jwt>
 ```
 
-### 4. Start services
+### 3. Add to Claude Code
 
-```bash
-# Broker (handles peer registration, auth, fleet state)
-claude-peers broker
+Add to your `~/.claude/settings.json`:
 
-# MCP server (Claude Code integration, auto-started by Claude)
-claude-peers server
-
-# Daemon supervisor (manages autonomous agent workflows)
-claude-peers supervisor
-
-# Fleet memory (consolidates activity into Claude memory)
-claude-peers dream-watch
-
-# Gridwatch dashboard (real-time fleet observability)
-claude-peers gridwatch
-
-# Wazuh bridge (security event ingestion from Wazuh EDR)
-claude-peers wazuh-bridge
+```json
+{
+  "mcpServers": {
+    "claude-peers": {
+      "command": "claude-peers",
+      "args": ["server"]
+    }
+  }
+}
 ```
 
-## CLI Reference
+Claude Code sessions will now automatically register with the broker, discover peers, and exchange messages.
+
+## CLI Commands
 
 ```
 claude-peers init <role> [url]              Generate config (broker or client)
 claude-peers config                         Show current config
-claude-peers broker                         Start the trust broker
-claude-peers server                         Start MCP stdio server (Claude Code)
-claude-peers status                         Show broker status and peers
+claude-peers broker                         Start the broker daemon
+claude-peers server                         Start MCP stdio server (used by Claude Code)
+claude-peers status                         Show broker status and all peers
 claude-peers peers                          List all peers
 claude-peers send <id> <msg>                Send a message to a peer
-claude-peers issue-token <pub> <role>       Issue a UCAN capability token
+claude-peers issue-token <pub-path> <role>  Issue a UCAN token for a machine
 claude-peers save-token <jwt>               Save a UCAN token locally
-claude-peers unquarantine <machine>         Restore a quarantined machine
-claude-peers dream                          One-shot fleet memory snapshot
-claude-peers dream-watch                    Continuous fleet memory via NATS
-claude-peers supervisor                     Run daemon supervisor
-claude-peers gridwatch                      Start fleet dashboard
-claude-peers wazuh-bridge                   Bridge Wazuh alerts to NATS
-claude-peers security-watch                 Correlate security events, escalate, alert
-claude-peers response-daemon                Automated incident response (forensics, IP blocks, email)
-claude-peers sim-attack <scenario> [flags]  Simulate attack scenarios for testing
+claude-peers refresh-token                  Renew current token
+claude-peers mint-root                      Mint a new root token
+claude-peers dream                          Snapshot fleet state to Claude memory
+claude-peers dream-watch                    Watch fleet via NATS and keep memory fresh
+claude-peers generate-nkey                  Generate a NATS NKey pair
 claude-peers kill-broker                    Stop the broker daemon
+claude-peers reauth-fleet                   Re-issue tokens for fleet machines
 ```
+
+## Token Roles
+
+| Role | Capabilities |
+|------|-------------|
+| `peer-session` | Register, heartbeat, list peers, send/poll messages, read/write memory |
+| `fleet-read` | List peers, read events, read memory |
+| `fleet-write` | List peers, read events, read/write memory |
+| `cli` | List peers, send messages, read events |
 
 ## Configuration
 
 Config file: `~/.config/claude-peers/config.json`
 
-```json
-{
-  "role": "client",
-  "broker_url": "http://100.109.211.128:7899",
-  "machine_name": "omarchy",
-  "nats_token": "nats-...",
-  "llm_base_url": "http://100.109.211.128:4000/v1",
-  "llm_api_key": "sk-..."
-}
-```
+Environment variable overrides:
 
-Key files in `~/.config/claude-peers/`:
-| File | Purpose |
-|------|---------|
-| `config.json` | Runtime configuration |
-| `identity.pem` | Ed25519 private key (mode 0600) |
-| `identity.pub` | Ed25519 public key |
-| `root.pub` | Fleet root public key (from broker) |
-| `token.jwt` | UCAN capability token (mode 0600) |
-
-All config fields have environment variable overrides (`CLAUDE_PEERS_*`).
-
-## NATS Subjects
-
-| Subject | Publisher | Content |
-|---------|-----------|---------|
-| `fleet.peer.joined` | Broker | Peer registration |
-| `fleet.peer.left` | Broker | Peer departure |
-| `fleet.summary` | Broker | Summary changes |
-| `fleet.message` | Broker | Message sent |
-| `fleet.security.fim` | Wazuh bridge | File integrity alerts |
-| `fleet.security.auth` | Wazuh bridge | Authentication events |
-| `fleet.security.process` | Wazuh bridge | Process anomalies |
-| `fleet.security.network` | Wazuh bridge | Network anomalies |
-| `fleet.security.quarantine` | Wazuh bridge | Quarantine triggers |
+| Variable | Description |
+|----------|-------------|
+| `CLAUDE_PEERS_BROKER_URL` | Broker HTTP endpoint |
+| `CLAUDE_PEERS_LISTEN` | Broker bind address |
+| `CLAUDE_PEERS_MACHINE` | Machine name |
+| `CLAUDE_PEERS_DB` | SQLite database path |
+| `CLAUDE_PEERS_NATS` | NATS server URL |
+| `CLAUDE_PEERS_NATS_TOKEN` | NATS auth token |
+| `CLAUDE_PEERS_NATS_NKEY` | Path to NATS NKey seed |
+| `CLAUDE_PEERS_TOKEN` | UCAN auth token |
+| `CLAUDE_PEERS_LLM_URL` | LLM endpoint for auto-summaries |
+| `CLAUDE_PEERS_LLM_API_KEY` | LLM API key |
 
 ## Broker API
 
-All endpoints (except `/health`) require a UCAN Bearer token with the appropriate capability.
-
-| Method | Path | Capability | Description |
-|--------|------|-----------|-------------|
-| GET | `/health` | (public) | Broker status |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | None | Health check |
+| POST | `/challenge` | None | Broker identity verification |
+| POST | `/refresh-token` | Bearer | Refresh expiring token |
 | POST | `/register` | `peer/register` | Register a peer |
 | POST | `/heartbeat` | `peer/heartbeat` | Keep-alive |
-| POST | `/list-peers` | `peer/list` | Discover peers |
-| POST | `/send-message` | `msg/send` | Send a message |
-| POST | `/poll-messages` | `msg/poll` | Receive messages |
-| POST | `/set-summary` | `peer/set-summary` | Update work summary |
+| POST | `/set-summary` | `peer/set-summary` | Update peer summary |
+| POST | `/set-name` | `peer/set-summary` | Update peer name |
+| POST | `/list-peers` | `peer/list` | List peers |
+| POST | `/send-message` | `msg/send` | Send message |
+| POST | `/poll-messages` | `msg/poll` | Poll messages (marks delivered) |
+| POST | `/peek-messages` | `msg/poll` | Peek messages (non-destructive) |
+| POST | `/ack-message` | `msg/ack` | Acknowledge message |
+| POST | `/unregister` | `peer/unregister` | Unregister peer |
 | GET | `/events` | `events/read` | Recent events |
-| GET | `/fleet-memory` | `memory/read` | Fleet memory document |
-| POST | `/fleet-memory` | `memory/write` | Update fleet memory |
-| GET | `/machine-health` | `events/read` | Per-machine health scores |
-| POST | `/unquarantine` | `memory/write` | Restore quarantined machine |
+| GET | `/fleet-memory` | `memory/read` | Read fleet memory |
+| POST | `/fleet-memory` | `memory/write` | Write fleet memory |
 
 ## Dependencies
 
-- Go 1.25+
-- [NATS Server](https://nats.io/) with JetStream enabled
-- [Wazuh](https://wazuh.com/) manager (Docker) + agents on fleet machines
-- [vinayprograms/agent](https://github.com/vinayprograms/agent) binary (for daemon supervisor)
-- `golang-jwt/jwt/v5` (UCAN tokens)
-- `nats-io/nats.go` (NATS client)
-- `modernc.org/sqlite` (broker storage)
-
-## Production Deployment
-
-Each component runs as a systemd user service:
-
-```bash
-# ~/.config/systemd/user/claude-peers-broker.service
-[Service]
-ExecStart=%h/.local/bin/claude-peers broker
-
-# ~/.config/systemd/user/claude-peers-supervisor.service
-[Service]
-ExecStart=%h/.local/bin/claude-peers supervisor
-Environment=CLAUDE_PEERS_TOKEN=<jwt>
-
-# ~/.config/systemd/user/claude-peers-wazuh-bridge.service
-[Service]
-ExecStart=%h/.local/bin/claude-peers wazuh-bridge
-Environment=WAZUH_ALERTS_PATH=/path/to/alerts.json
-```
+- [golang-jwt/jwt](https://github.com/golang-jwt/jwt) - Ed25519 JWT tokens
+- [nats-io/nats.go](https://github.com/nats-io/nats.go) - NATS JetStream (optional)
+- [nats-io/nkeys](https://github.com/nats-io/nkeys) - NATS NKey authentication
+- [modernc.org/sqlite](https://modernc.org/sqlite) - Pure-Go SQLite (no CGo)
 
 ## License
 
-Private. Copyright Human Frontier Labs Inc.
+MIT
