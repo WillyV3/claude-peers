@@ -217,7 +217,11 @@ func (b *Broker) register(req RegisterRequest) RegisterResponse {
 	id := generatePeerID()
 	now := nowISO()
 
-	// Remove existing registration for same PID+machine combo.
+	// Remove stale registrations for same machine+tty (handles restarts with new PID)
+	// and same PID+machine (handles re-registration without restart).
+	if req.TTY != "" {
+		b.db.Exec("DELETE FROM peers WHERE machine = ? AND tty = ?", req.Machine, req.TTY)
+	}
 	b.db.Exec("DELETE FROM peers WHERE pid = ? AND machine = ?", req.PID, req.Machine)
 
 	b.db.Exec(
