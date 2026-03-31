@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"sync"
+	"time"
 )
 
 // JSON-RPC 2.0 types -- minimal, no SDK needed.
@@ -20,10 +22,10 @@ type jsonrpcRequest struct {
 }
 
 type jsonrpcResponse struct {
-	JSONRPC string        `json:"jsonrpc"`
-	ID      any           `json:"id"`
-	Result  any           `json:"result,omitempty"`
-	Error   *jsonrpcError `json:"error,omitempty"`
+	JSONRPC string         `json:"jsonrpc"`
+	ID      any            `json:"id"`
+	Result  any            `json:"result,omitempty"`
+	Error   *jsonrpcError  `json:"error,omitempty"`
 }
 
 type jsonrpcError struct {
@@ -154,20 +156,6 @@ var mcpTools = []map[string]any{
 		},
 	},
 	{
-		"name":        "set_name",
-		"description": "Override the auto-generated peer name with a custom name. The name persists for the session lifetime.",
-		"inputSchema": map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"name": map[string]any{
-					"type":        "string",
-					"description": "Custom name for this peer (e.g. 'frontend-worker', 'test-runner')",
-				},
-			},
-			"required": []string{"name"},
-		},
-	},
-	{
 		"name":        "check_messages",
 		"description": "Manually check for new messages from other Claude Code instances. Messages are normally pushed automatically via channel notifications, but you can use this as a fallback.",
 		"inputSchema": map[string]any{
@@ -191,10 +179,12 @@ Available tools:
 - list_peers: Discover other Claude Code instances (scope: all/machine/directory/repo)
 - send_message: Send a message to another instance by ID
 - set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
-- set_name: Override the auto-generated peer name with a custom name
 - check_messages: Check for new messages from other Claude Code instances -- CALL THIS ON EVERY USER PROMPT`
 
 func handleInitialize(id any, t *MCPTransport) {
+	// Build dynamic instructions with fleet context injection.
+	instructions := mcpInstructions + buildFleetContext()
+
 	t.respond(id, map[string]any{
 		"protocolVersion": mcpProtocolVersion,
 		"capabilities": map[string]any{
@@ -207,8 +197,58 @@ func handleInitialize(id any, t *MCPTransport) {
 			"name":    serverName,
 			"version": serverVersion,
 		},
-		"instructions": mcpInstructions,
+		"instructions": instructions,
 	})
+}
+
+// buildFleetContext fetches active peers, recent events, and fleet memory
+// from the broker and returns a context string to inject into Claude's session.
+// Runs at session start -- gives Claude immediate awareness of the fleet.
+func buildFleetContext() string {
+	var ctx string
+
+	// Active peers
+	var peers []Peer
+	if err := cliFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers); err == nil && len(peers) > 0 {
+		ctx += "\n\n--- FLEET CONTEXT (injected at session start) ---"
+		ctx += fmt.Sprintf("\n%d active Claude session(s) on the network:", len(peers))
+		for _, p := range peers {
+			line := fmt.Sprintf("\n- %s on %s", p.Name, p.Machine)
+			if p.Summary != "" {
+				line += fmt.Sprintf(" -- %s", p.Summary)
+			}
+			ctx += line
+		}
+	}
+
+	// Recent events (last 5)
+	var events []Event
+	if err := cliFetch("/events?limit=5", nil, &events); err == nil && len(events) > 0 {
+		ctx += "\n\nRecent fleet events:"
+		for _, e := range events {
+			ctx += fmt.Sprintf("\n- [%s] %s %s", e.Type, e.PeerID, e.Data)
+		}
+	}
+
+	// Fleet memory snippet (first 500 chars)
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, _ := http.NewRequest("GET", cfg.BrokerURL+"/fleet-memory", nil)
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
+	if resp, err := client.Do(req); err == nil && resp.StatusCode == 200 {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		mem := string(body)
+		if len(mem) > 500 {
+			mem = mem[:500] + "..."
+		}
+		if len(mem) > 10 {
+			ctx += "\n\nFleet memory:\n" + mem
+		}
+	}
+
+	return ctx
 }
 
 func handleToolsList(id any, t *MCPTransport) {
