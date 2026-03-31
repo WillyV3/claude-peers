@@ -97,6 +97,7 @@ Optionally add [NATS JetStream](https://nats.io/) for real-time event streaming 
 ```
 claude-peers init broker                   Set up broker (generates keys + token)
 claude-peers init client <broker-url>      Connect to a remote broker
+claude-peers config                        Show current config
 claude-peers broker                        Start the broker
 claude-peers server                        Start MCP server (used by Claude Code)
 claude-peers status                        Show broker status and peers
@@ -104,6 +105,8 @@ claude-peers peers                         List all peers
 claude-peers send <id> <msg>               Send a message to a peer
 claude-peers dream                         Snapshot state to shared memory
 claude-peers dream-watch                   Watch events and keep memory fresh
+claude-peers generate-nkey                 Generate a NATS NKey pair for per-machine auth
+claude-peers reauth-fleet                  Re-issue tokens for all fleet machines via SSH
 claude-peers kill-broker                   Stop the broker
 ```
 
@@ -124,8 +127,14 @@ Config: `~/.config/claude-peers/config.json`
 |----------|-------------|
 | `CLAUDE_PEERS_BROKER_URL` | Broker endpoint (default: `http://127.0.0.1:7899`) |
 | `CLAUDE_PEERS_MACHINE` | Machine name |
+| `CLAUDE_PEERS_LISTEN` | Address the broker binds to (default: `127.0.0.1:7899`) |
+| `CLAUDE_PEERS_DB` | SQLite database path |
 | `CLAUDE_PEERS_NATS` | NATS server URL (optional) |
+| `CLAUDE_PEERS_NATS_TOKEN` | NATS auth token (optional) |
+| `CLAUDE_PEERS_NATS_NKEY` | NATS NKey seed file path (optional, takes priority over NATS_TOKEN) |
 | `CLAUDE_PEERS_LLM_URL` | LLM endpoint for auto-summaries (optional) |
+| `CLAUDE_PEERS_LLM_MODEL` | LLM model for auto-summaries (default: `claude-haiku`) |
+| `CLAUDE_PEERS_LLM_API_KEY` | API key for LLM endpoint (optional) |
 
 ## Auth
 
@@ -135,6 +144,7 @@ Uses [UCAN](https://ucan.xyz/) (User Controlled Authorization Networks) -- Ed255
 |------|--------|
 | `peer-session` | Register, message, read/write memory |
 | `fleet-read` | Read-only: list peers, events, memory |
+| `fleet-write` | Read peers/events, read/write memory |
 | `cli` | List peers, send messages, read events |
 
 ## Dependencies
