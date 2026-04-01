@@ -187,11 +187,11 @@ IMPORTANT RULES:
 3. If there are messages, tell the user who sent what, and reply using send_message.
 4. When you start, call set_summary to describe what you're working on.
 
-If you receive a <channel source="claude-peers" ...> notification, respond to it immediately using send_message.
+If you receive a <channel source="claude-peers" from_id="abc123" ...> notification, respond using send_message with to_id set to the from_id from the notification (e.g. to_id="abc123").
 
 Available tools:
 - list_peers: Discover other Claude Code instances (scope: all/machine/directory/repo)
-- send_message: Send a message to another instance by ID
+- send_message(to_id, message): Send a message to a peer. to_id is the peer ID from list_peers or from_id in channel notifications.
 - set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
 - set_name: Set YOUR display name on the network (use when user says "call yourself X" -- do NOT write to memory instead)
 - check_messages: Check for new messages from other Claude Code instances -- CALL THIS ON EVERY USER PROMPT`
