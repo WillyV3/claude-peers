@@ -118,20 +118,31 @@ func filterEmpty(ss []string) []string {
 	return out
 }
 
-// autoName generates a readable peer name: repo@branch if in git, else dir-basename.
-// Machine name stays as separate metadata in the `machine` field.
-func autoName(machine string, project, tty string) string {
-	if project != "" {
-		return project
+// resolveAgentName returns the declared agent name for this session, or ""
+// if no declaration exists. Identity is explicit (ADR-001): no fallback to
+// project name, directory basename, or machine:tty. An empty return means
+// this session is ephemeral and cannot be addressed by name.
+//
+// Resolution order:
+//  1. agentNameOverride (set via --as flag, see main.go)
+//  2. CLAUDE_PEERS_AGENT env var
+//  3. .claude-peers-agent file in cwd (trimmed, first line only)
+func resolveAgentName(cwd string) string {
+	if agentNameOverride != "" {
+		return strings.TrimSpace(agentNameOverride)
 	}
-	// No git, no meaningful directory -- use machine:tty as fallback.
-	// The summary (generated separately) provides the real identity.
-	if tty != "" {
-		parts := strings.Split(tty, "/")
-		return machine + ":" + parts[len(parts)-1]
+	if env := os.Getenv("CLAUDE_PEERS_AGENT"); env != "" {
+		return strings.TrimSpace(env)
 	}
-	return machine
+	if data, err := os.ReadFile(filepath.Join(cwd, ".claude-peers-agent")); err == nil {
+		line := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)[0]
+		return strings.TrimSpace(line)
+	}
+	return ""
 }
+
+// agentNameOverride is set by main.go from the --as CLI flag, if provided.
+var agentNameOverride string
 
 func generateSummary(cwd, root, branch string, files []string) string {
 	var parts []string

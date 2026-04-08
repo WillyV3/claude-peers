@@ -171,12 +171,18 @@ func runServer(ctx context.Context) error {
 	branch := gitBranch(cwd)
 	project := autoProject(cwd, root)
 
-	name := autoName(cfg.MachineName, project, tty)
-	if branch != "" && project != "" {
-		name = project + "@" + branch
+	// ADR-001: agent names are declared, not derived. Read from (in order):
+	//   1. --as <name> flag (set via CLI arg before runMCP)
+	//   2. CLAUDE_PEERS_AGENT env var
+	//   3. .claude-peers-agent file in cwd
+	// If none of these are set, this session is ephemeral -- it exists on the
+	// network but cannot be messaged by name.
+	agentName := resolveAgentName(cwd)
+	if agentName != "" {
+		logMCP("Agent: %s", agentName)
+	} else {
+		logMCP("Agent: <ephemeral>")
 	}
-
-	logMCP("Name: %s", name)
 	logMCP("CWD: %s", cwd)
 	logMCP("Broker: %s", cfg.BrokerURL)
 
@@ -197,20 +203,24 @@ func runServer(ctx context.Context) error {
 
 	var reg RegisterResponse
 	if err := brokerFetch("/register", RegisterRequest{
-		PID:     os.Getpid(),
-		Machine: cfg.MachineName,
-		CWD:     cwd,
-		GitRoot: root,
-		TTY:     tty,
-		Name:    name,
-		Project: project,
-		Branch:  branch,
-		Summary: initialSummary,
+		AgentName: agentName,
+		PID:       os.Getpid(),
+		Machine:   cfg.MachineName,
+		CWD:       cwd,
+		GitRoot:   root,
+		TTY:       tty,
+		Project:   project,
+		Branch:    branch,
+		Summary:   initialSummary,
 	}, &reg); err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
+	if !reg.OK {
+		return fmt.Errorf("register failed: %s\n  held by session %s on %s (cwd: %s)\n  started: %s\n  kill that session or pick a different agent name",
+			reg.Error, reg.HeldBySession, reg.HeldByMachine, reg.HeldByCWD, reg.HeldBySince)
+	}
 	myID := reg.ID
-	logMCP("Registered as %s (%s)", name, myID)
+	logMCP("Registered as %s (session %s)", agentName, myID)
 
 	// Fetch fleet memory from broker and write locally.
 	go syncFleetMemory()
@@ -369,11 +379,11 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "Found %d peer(s) (scope: %s):\n\n", len(peers), args.Scope)
 		for _, p := range peers {
-			displayName := p.Name
-			if displayName == "" {
-				displayName = p.Machine
+			if p.AgentName != "" {
+				fmt.Fprintf(&sb, "%s (agent) on %s [session %s]\n", p.AgentName, p.Machine, p.ID)
+			} else {
+				fmt.Fprintf(&sb, "session %s on %s (ephemeral -- not addressable by name)\n", p.ID, p.Machine)
 			}
-			fmt.Fprintf(&sb, "%s on %s (id: %s)\n", displayName, p.Machine, p.ID)
 			if p.Project != "" {
 				fmt.Fprintf(&sb, "  Project: %s", p.Project)
 				if p.Branch != "" {
@@ -391,22 +401,38 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 
 	case "send_message":
 		var args struct {
-			ToID    string `json:"to_id"`
+			To      string `json:"to"`
 			Message string `json:"message"`
 		}
 		json.Unmarshal(call.Arguments, &args)
 
-		if args.ToID == "" {
-			toolError(id, t, "to_id is required")
+		if args.To == "" {
+			toolError(id, t, "to is required (agent name or session id)")
 			return
 		}
 
+		// Default to ToAgent. Only route as ToSession if the target is the
+		// literal session ID of a currently-live ephemeral peer (no agent name).
+		// Never silently downgrade an offline-agent send -- that would drop
+		// messages the caller meant to queue for when the agent reconnects.
+		var peers []Peer
+		brokerFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers)
+		sendReq := SendMessageRequest{FromID: myID, Text: args.Message}
+		var targetEphemeralSession string
+		for _, p := range peers {
+			if p.ID == args.To && p.AgentName == "" {
+				targetEphemeralSession = args.To
+				break
+			}
+		}
+		if targetEphemeralSession != "" {
+			sendReq.ToSession = targetEphemeralSession
+		} else {
+			sendReq.ToAgent = args.To
+		}
+
 		var resp SendMessageResponse
-		err := brokerFetch("/send-message", SendMessageRequest{
-			FromID: myID,
-			ToID:   args.ToID,
-			Text:   args.Message,
-		}, &resp)
+		err := brokerFetch("/send-message", sendReq, &resp)
 		if err != nil {
 			toolError(id, t, "Error sending message: %v", err)
 			return
@@ -415,7 +441,11 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 			toolError(id, t, "Failed to send: %s", resp.Error)
 			return
 		}
-		toolResult(id, t, "Message sent to peer %s", args.ToID)
+		if resp.Queued {
+			toolResult(id, t, "Message queued for agent %q (no live session holds it right now -- will deliver on reconnect).", args.To)
+		} else {
+			toolResult(id, t, "Message sent to %s", args.To)
+		}
 
 	case "set_summary":
 		var args struct {
@@ -433,22 +463,6 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 		}
 		toolResult(id, t, "Summary updated: %q", args.Summary)
 
-	case "set_name":
-		var args struct {
-			Name string `json:"name"`
-		}
-		json.Unmarshal(call.Arguments, &args)
-
-		err := brokerFetch("/set-name", SetNameRequest{
-			ID:   myID,
-			Name: args.Name,
-		}, nil)
-		if err != nil {
-			toolError(id, t, "Error setting name: %v", err)
-			return
-		}
-		toolResult(id, t, "Name updated: %q", args.Name)
-
 	case "check_messages":
 		var resp PollMessagesResponse
 		err := brokerFetch("/poll-messages", PollMessagesRequest{ID: myID}, &resp)
@@ -462,24 +476,29 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 		}
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "%d new message(s):\n\n", len(resp.Messages))
+		// Look up sender info once.
+		var peers []Peer
+		brokerFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers)
 		for _, m := range resp.Messages {
-			// Look up sender info
-			fromMachine, fromSummary := "", ""
-			var peers []Peer
-			if err := brokerFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers); err == nil {
-				for _, p := range peers {
-					if p.ID == m.FromID {
-						fromMachine = p.Machine
-						fromSummary = p.Summary
-						break
-					}
+			sender := m.FromAgent
+			if sender == "" {
+				sender = m.FromSession
+			}
+			var fromMachine, fromSummary string
+			for _, p := range peers {
+				if p.ID == m.FromSession {
+					fromMachine = p.Machine
+					fromSummary = p.Summary
+					break
 				}
 			}
-			fmt.Fprintf(&sb, "From %s on %s", m.FromID, fromMachine)
+			fmt.Fprintf(&sb, "From %s on %s", sender, fromMachine)
 			if fromSummary != "" {
 				fmt.Fprintf(&sb, " (%s)", fromSummary)
 			}
 			fmt.Fprintf(&sb, " at %s:\n%s\n\n---\n\n", m.SentAt, m.Text)
+			// ACK so it doesn't surface again.
+			brokerFetch("/ack-message", AckMessageRequest{SessionID: myID, MessageID: m.ID}, nil)
 		}
 		toolResult(id, t, "%s", sb.String())
 
@@ -507,37 +526,66 @@ func toolError(id any, t *MCPTransport, format string, args ...any) {
 	})
 }
 
+// pushedIDs is the set of message IDs the push loop has already written as
+// channel notifications. Prevents re-pushing the same message every tick.
+// The check_messages tool call is the authoritative drain path and calls
+// /poll-messages which sets delivered_at + ack_at -- at that point we can
+// forget the ID. Until then we keep it in-memory so we don't spam.
+var pushedIDs = struct {
+	sync.Mutex
+	m map[int]bool
+}{m: make(map[int]bool)}
+
+// pollAndPush pushes new messages via notifications/claude/channel for any
+// MCP client that honors them, but does NOT consume the message from the
+// broker queue. check_messages remains the authoritative drain: it calls
+// /poll-messages (marks delivered_at), returns the content, and acks.
+// If push works: the model sees it early and may call check_messages to drain.
+// If push doesn't work: check_messages on next prompt still drains reliably.
+// Either way, messages never get silently dropped between push and tool call.
 func pollAndPush(myID, cwd, root string, t *MCPTransport) {
 	var resp PollMessagesResponse
-	if err := brokerFetch("/poll-messages", PollMessagesRequest{ID: myID}, &resp); err != nil {
+	if err := brokerFetch("/peek-messages", PollMessagesRequest{ID: myID}, &resp); err != nil {
 		return
 	}
 
+	if len(resp.Messages) == 0 {
+		return
+	}
+
+	var peers []Peer
+	brokerFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers)
+	peerByID := make(map[string]Peer, len(peers))
+	for _, p := range peers {
+		peerByID[p.ID] = p
+	}
+
+	pushedIDs.Lock()
+	defer pushedIDs.Unlock()
+
 	for _, msg := range resp.Messages {
-		fromSummary, fromCwd, fromMachine := "", "", ""
-		var peers []Peer
-		if err := brokerFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers); err == nil {
-			for _, p := range peers {
-				if p.ID == msg.FromID {
-					fromSummary = p.Summary
-					fromCwd = p.CWD
-					fromMachine = p.Machine
-					break
-				}
-			}
+		if pushedIDs.m[msg.ID] {
+			continue // already pushed once -- don't spam
 		}
+		sender := msg.FromAgent
+		if sender == "" {
+			sender = msg.FromSession
+		}
+		fromPeer := peerByID[msg.FromSession]
 
 		t.writeNotification("notifications/claude/channel", map[string]any{
 			"content": msg.Text,
 			"meta": map[string]any{
-				"from_id":      msg.FromID,
-				"from_machine": fromMachine,
-				"from_summary": fromSummary,
-				"from_cwd":     fromCwd,
+				"message_id":   msg.ID,
+				"from_agent":   msg.FromAgent,
+				"from_session": msg.FromSession,
+				"from_machine": fromPeer.Machine,
+				"from_summary": fromPeer.Summary,
+				"from_cwd":     fromPeer.CWD,
 				"sent_at":      msg.SentAt,
 			},
 		})
-
-		logMCP("Pushed message from %s@%s: %.80s", msg.FromID, fromMachine, msg.Text)
+		pushedIDs.m[msg.ID] = true
+		logMCP("Pushed message from %s@%s: %.80s", sender, fromPeer.Machine, msg.Text)
 	}
 }

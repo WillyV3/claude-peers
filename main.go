@@ -21,6 +21,10 @@ func main() {
 	initConfig()
 	authToken = loadAuthToken()
 
+	// Parse --as <agent-name> before dispatching. Strips the flag from os.Args
+	// so subcommand switch below sees a clean slice.
+	parseGlobalFlags()
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -93,6 +97,30 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+}
+
+// parseGlobalFlags extracts --as <name> from os.Args and stores it in
+// agentNameOverride. Removes the flag + its value from os.Args so subcommand
+// dispatch isn't confused by it.
+func parseGlobalFlags() {
+	out := make([]string, 0, len(os.Args))
+	for i := 0; i < len(os.Args); i++ {
+		a := os.Args[i]
+		switch {
+		case a == "--as":
+			if i+1 >= len(os.Args) {
+				fmt.Fprintln(os.Stderr, "--as requires an agent name")
+				os.Exit(2)
+			}
+			agentNameOverride = os.Args[i+1]
+			i++
+		case strings.HasPrefix(a, "--as="):
+			agentNameOverride = strings.TrimPrefix(a, "--as=")
+		default:
+			out = append(out, a)
+		}
+	}
+	os.Args = out
 }
 
 func printUsage() {
@@ -270,15 +298,7 @@ func cliStatus() {
 		cliFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers)
 		fmt.Println("\nPeers:")
 		for _, p := range peers {
-			displayName := p.Name
-			if displayName == "" {
-				displayName = p.ID
-			}
-			fmt.Printf("  %s on %s (id: %s)  PID:%d  %s\n", displayName, p.Machine, p.ID, p.PID, p.CWD)
-			if p.Summary != "" {
-				fmt.Printf("         %s\n", p.Summary)
-			}
-			fmt.Printf("         Last seen: %s\n", p.LastSeen)
+			printPeerLine(p, "  ")
 		}
 	}
 }
@@ -294,32 +314,62 @@ func cliPeers() {
 		return
 	}
 	for _, p := range peers {
-		displayName := p.Name
-		if displayName == "" {
-			displayName = p.ID
-		}
-		fmt.Printf("%s on %s (id: %s)  PID:%d  %s\n", displayName, p.Machine, p.ID, p.PID, p.CWD)
-		if p.Summary != "" {
-			fmt.Printf("  Summary: %s\n", p.Summary)
-		}
+		printPeerLine(p, "")
 	}
 }
 
-func cliSend(toID, msg string) {
+// printPeerLine renders one peer with agent-or-session identity prefix.
+func printPeerLine(p Peer, indent string) {
+	if p.AgentName != "" {
+		fmt.Printf("%s%s (agent) on %s [session %s]  %s\n", indent, p.AgentName, p.Machine, p.ID, p.CWD)
+	} else {
+		fmt.Printf("%ssession %s on %s (ephemeral)  %s\n", indent, p.ID, p.Machine, p.CWD)
+	}
+	if p.Summary != "" {
+		fmt.Printf("%s  %s\n", indent, p.Summary)
+	}
+	fmt.Printf("%s  Last seen: %s\n", indent, p.LastSeen)
+}
+
+// cliSend sends a message by agent name (stable handle, queues if offline)
+// or by session ID when the target is clearly a session ID (8-char hex that
+// matches a live session but NOT any agent name). Default is ToAgent -- we
+// never silently downgrade an offline-agent send to a session lookup, because
+// that drops messages the user meant to queue.
+func cliSend(to, msg string) {
+	var peers []Peer
+	cliFetch("/list-peers", ListPeersRequest{Scope: "all"}, &peers)
+
+	// Is "to" the literal session ID of a live, ephemeral peer (no agent name)?
+	// Only then do we route as ToSession. Otherwise always ToAgent.
+	var targetEphemeralSession string
+	for _, p := range peers {
+		if p.ID == to && p.AgentName == "" {
+			targetEphemeralSession = to
+			break
+		}
+	}
+
+	req := SendMessageRequest{FromID: "cli", Text: msg}
+	if targetEphemeralSession != "" {
+		req.ToSession = targetEphemeralSession
+	} else {
+		req.ToAgent = to
+	}
+
 	var resp SendMessageResponse
-	if err := cliFetch("/send-message", SendMessageRequest{
-		FromID: "cli",
-		ToID:   toID,
-		Text:   msg,
-	}, &resp); err != nil {
+	if err := cliFetch("/send-message", req, &resp); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if resp.OK {
-		fmt.Printf("Message sent to %s\n", toID)
-	} else {
+	if !resp.OK {
 		fmt.Fprintf(os.Stderr, "Failed: %s\n", resp.Error)
 		os.Exit(1)
+	}
+	if resp.Queued {
+		fmt.Printf("Message queued for agent %q (no live session holds it right now -- will deliver on reconnect).\n", to)
+	} else {
+		fmt.Printf("Message sent to %s\n", to)
 	}
 }
 

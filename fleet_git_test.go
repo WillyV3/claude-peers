@@ -29,26 +29,13 @@ func TestAutoProjectSubdir(t *testing.T) {
 	}
 }
 
-func TestAutoNameWithProject(t *testing.T) {
-	got := autoName("machine", "claude-peers", "")
-	if got != "claude-peers" {
-		t.Fatalf("expected claude-peers, got %s", got)
-	}
-}
-
-func TestAutoNameWithoutProject(t *testing.T) {
-	got := autoName("machine", "", "")
-	if got != "machine" {
-		t.Fatalf("expected machine, got %s", got)
-	}
-}
-
-func TestAutoNameWithTTY(t *testing.T) {
-	got := autoName("laptop", "", "pts/3")
-	if got != "laptop:3" {
-		t.Fatalf("expected laptop:3, got %s", got)
-	}
-}
+// ADR-001: autoName was deleted. Agent names are declared, not derived.
+// The replacement is resolveAgentName, which reads from (in order):
+// 1. agentNameOverride (--as flag)
+// 2. CLAUDE_PEERS_AGENT env var
+// 3. .claude-peers-agent file in cwd
+// Tests for resolveAgentName live in arch_test scope if needed -- the important
+// contract is that no agent name means ephemeral, verified by T4.
 
 func TestFilterEmpty(t *testing.T) {
 	cases := []struct {

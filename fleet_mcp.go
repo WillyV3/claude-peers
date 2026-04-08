@@ -125,25 +125,25 @@ var mcpTools = []map[string]any{
 	},
 	{
 		"name":        "send_message",
-		"description": "Send a message to another Claude Code instance by peer ID. The message will be pushed into their session immediately via channel notification.",
+		"description": "Send a message to another Claude Code session. Use the agent name (stable handle) when you know it; fall back to session ID for ephemeral peers. Agent-addressed messages queue if the recipient is offline and deliver on reconnect. Session-addressed messages drop if the session is gone.",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"to_id": map[string]any{
+				"to": map[string]any{
 					"type":        "string",
-					"description": "The peer ID of the target Claude Code instance (from list_peers)",
+					"description": "Agent name (preferred, stable across restarts) or session ID (for ephemeral peers). Agent names are listed by list_peers under the (agent) label.",
 				},
 				"message": map[string]any{
 					"type":        "string",
 					"description": "The message to send",
 				},
 			},
-			"required": []string{"to_id", "message"},
+			"required": []string{"to", "message"},
 		},
 	},
 	{
 		"name":        "set_summary",
-		"description": "Set a brief summary (1-2 sentences) of what you are currently working on. This is visible to other Claude Code instances when they list peers.",
+		"description": "Set a brief summary (1-2 sentences) of what you are currently working on. Visible to other Claude Code instances when they list peers.",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -156,22 +156,8 @@ var mcpTools = []map[string]any{
 		},
 	},
 	{
-		"name":        "set_name",
-		"description": "Set a display name for THIS Claude Code session on the peer network. This is how other sessions and the dashboard will identify you. Use this when the user asks you to name yourself or identify as something specific (e.g. 'call yourself Bob'). Do NOT write names to memory -- use this tool instead.",
-		"inputSchema": map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"name": map[string]any{
-					"type":        "string",
-					"description": "The display name for this session (e.g. 'Bob', 'auth-debugger', 'Corn-helper')",
-				},
-			},
-			"required": []string{"name"},
-		},
-	},
-	{
 		"name":        "check_messages",
-		"description": "Manually check for new messages from other Claude Code instances. Messages are normally pushed automatically via channel notifications, but you can use this as a fallback.",
+		"description": "Manually check for new messages. Normally messages push automatically via notifications/claude/channel with ACK; this tool is the fallback path.",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{},
@@ -179,22 +165,24 @@ var mcpTools = []map[string]any{
 	},
 }
 
-var mcpInstructions = `You are connected to the claude-peers network. Other Claude Code instances across multiple machines can see you and send you messages.
+var mcpInstructions = `You are connected to the claude-peers network. Other Claude Code sessions across the fleet can see you and send you messages.
 
-IMPORTANT RULES:
-1. When you START a new conversation, call check_messages to see if anyone sent you something.
-2. When the user gives you a new prompt, call check_messages FIRST before doing anything else.
-3. If there are messages, tell the user who sent what, and reply using send_message.
-4. When you start, call set_summary to describe what you're working on.
+IDENTITY:
+- Your identity on the network is your "agent name" -- declared at startup via the --as flag, CLAUDE_PEERS_AGENT env var, or a .claude-peers-agent file in the working directory.
+- If you have no agent name, you are ephemeral: visible in list_peers but NOT addressable by name. You can still send messages.
+- Agent names are globally unique while held. Never change names mid-session -- identity is declared at startup.
 
-If you receive a <channel source="claude-peers" from_id="abc123" ...> notification and want to reply, ALWAYS call list_peers first to get the sender's CURRENT peer ID. Do NOT use from_id directly -- peer IDs change between sessions and the from_id may be stale. Look up the sender by their machine name, working directory, or display name in the list_peers results.
+MESSAGING:
+- Push delivery: messages arrive as notifications/claude/channel with from_agent / from_session / message_id in the meta block. You don't need to poll on every prompt -- push + ack is reliable.
+- To reply to a notification, call send_message with to = from_agent (stable, preferred) or from_session (ephemeral fallback).
+- send_message to an offline agent name queues the message -- it delivers when that agent reconnects. Don't assume the recipient is online.
+- On new conversations: call check_messages ONCE to drain anything that came in before the MCP channel was up. After that, trust the push.
 
-Available tools:
-- list_peers: Discover other Claude Code instances (scope: all/machine/directory/repo)
-- send_message(to_id, message): Send a message to a peer. to_id can be a peer ID from list_peers OR a display name (e.g. "Jim"). Names are preferred over IDs because IDs change between sessions.
-- set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
-- set_name: Set YOUR display name on the network (use when user says "call yourself X" -- do NOT write to memory instead)
-- check_messages: Check for new messages from other Claude Code instances -- CALL THIS ON EVERY USER PROMPT`
+TOOLS:
+- list_peers: Discover sessions on the network (scope: all/machine/directory/repo).
+- send_message(to, message): Send a message. "to" is an agent name or session ID.
+- set_summary: Set a 1-2 sentence summary of your current work.
+- check_messages: Drain undelivered messages (fallback -- push is the normal path).`
 
 func handleInitialize(id any, t *MCPTransport) {
 	// Build dynamic instructions with fleet context injection.
@@ -228,7 +216,11 @@ func buildFleetContext() string {
 		ctx += "\n\n--- FLEET CONTEXT (injected at session start) ---"
 		ctx += fmt.Sprintf("\n%d active Claude session(s) on the network:", len(peers))
 		for _, p := range peers {
-			line := fmt.Sprintf("\n- %s on %s", p.Name, p.Machine)
+			label := p.AgentName
+			if label == "" {
+				label = "session " + p.ID + " (ephemeral)"
+			}
+			line := fmt.Sprintf("\n- %s on %s", label, p.Machine)
 			if p.Summary != "" {
 				line += fmt.Sprintf(" -- %s", p.Summary)
 			}

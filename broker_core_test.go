@@ -31,15 +31,25 @@ func testBroker(t *testing.T) *Broker {
 	return b
 }
 
+// mustRegister registers a session and fails the test on conflict.
+func mustRegister(t *testing.T, b *Broker, req RegisterRequest) string {
+	t.Helper()
+	resp := b.register(req)
+	if !resp.OK {
+		t.Fatalf("register failed: %s (held by %s)", resp.Error, resp.HeldBySession)
+	}
+	return resp.ID
+}
+
 func TestRegisterAndList(t *testing.T) {
 	b := testBroker(t)
 
-	resp := b.register(RegisterRequest{
+	id := mustRegister(t, b, RegisterRequest{
 		PID: os.Getpid(), Machine: "test-machine",
 		CWD: "/tmp", Summary: "testing",
 	})
-	if resp.ID == "" {
-		t.Fatal("expected peer ID")
+	if id == "" {
+		t.Fatal("expected session ID")
 	}
 
 	peers := b.listPeers(ListPeersRequest{Scope: "all"})
@@ -54,25 +64,26 @@ func TestRegisterAndList(t *testing.T) {
 	}
 }
 
-func TestSendAndPollMessage(t *testing.T) {
+func TestSendToSessionAndPoll(t *testing.T) {
 	b := testBroker(t)
 
-	r1 := b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
-	r2 := b.register(RegisterRequest{PID: 2, Machine: "m2", CWD: "/b"})
+	s1 := mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
+	s2 := mustRegister(t, b, RegisterRequest{PID: 2, Machine: "m2", CWD: "/b"})
 
-	resp := b.sendMessage(SendMessageRequest{FromID: r1.ID, ToID: r2.ID, Text: "hello"})
+	resp := b.sendMessage(SendMessageRequest{FromID: s1, ToSession: s2, Text: "hello"})
 	if !resp.OK {
 		t.Fatalf("send failed: %s", resp.Error)
 	}
 
-	// Peek should return without marking delivered
-	peek := b.peekMessages(PollMessagesRequest{ID: r2.ID})
+	// Peek should return without marking delivered.
+	peek := b.peekMessages(PollMessagesRequest{ID: s2})
 	if len(peek.Messages) != 1 {
 		t.Fatalf("expected 1 peeked message, got %d", len(peek.Messages))
 	}
 
-	// Poll should return and mark delivered
-	poll := b.pollMessages(PollMessagesRequest{ID: r2.ID})
+	// Poll marks delivered_at (but not ack_at), so a subsequent poll on the
+	// same session returns empty.
+	poll := b.pollMessages(PollMessagesRequest{ID: s2})
 	if len(poll.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(poll.Messages))
 	}
@@ -80,43 +91,28 @@ func TestSendAndPollMessage(t *testing.T) {
 		t.Fatalf("expected hello, got %s", poll.Messages[0].Text)
 	}
 
-	// Second poll should be empty
-	poll2 := b.pollMessages(PollMessagesRequest{ID: r2.ID})
+	poll2 := b.pollMessages(PollMessagesRequest{ID: s2})
 	if len(poll2.Messages) != 0 {
 		t.Fatalf("expected 0 messages after poll, got %d", len(poll2.Messages))
 	}
 }
 
-func TestSendToNonexistentPeer(t *testing.T) {
+func TestSendToNonexistentSession(t *testing.T) {
 	b := testBroker(t)
 
-	resp := b.sendMessage(SendMessageRequest{FromID: "a", ToID: "nonexistent", Text: "hi"})
+	// Register the sender so FromID is valid (though broker doesn't enforce that).
+	s1 := mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
+	resp := b.sendMessage(SendMessageRequest{FromID: s1, ToSession: "nonexistent", Text: "hi"})
 	if resp.OK {
-		t.Fatal("expected send to fail for nonexistent peer")
-	}
-}
-
-func TestUnregisterCleansMessages(t *testing.T) {
-	b := testBroker(t)
-
-	r1 := b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
-	r2 := b.register(RegisterRequest{PID: 2, Machine: "m2", CWD: "/b"})
-
-	b.sendMessage(SendMessageRequest{FromID: r1.ID, ToID: r2.ID, Text: "hello"})
-	b.unregister(UnregisterRequest{ID: r2.ID})
-
-	// Messages should be cleaned up
-	poll := b.pollMessages(PollMessagesRequest{ID: r2.ID})
-	if len(poll.Messages) != 0 {
-		t.Fatalf("expected 0 messages after unregister, got %d", len(poll.Messages))
+		t.Fatal("expected send to fail for nonexistent session")
 	}
 }
 
 func TestSetSummary(t *testing.T) {
 	b := testBroker(t)
 
-	r := b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a", Summary: "old"})
-	b.setSummary(SetSummaryRequest{ID: r.ID, Summary: "new"})
+	id := mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/a", Summary: "old"})
+	b.setSummary(SetSummaryRequest{ID: id, Summary: "new"})
 
 	peers := b.listPeers(ListPeersRequest{Scope: "all"})
 	if peers[0].Summary != "new" {
@@ -124,24 +120,12 @@ func TestSetSummary(t *testing.T) {
 	}
 }
 
-func TestSetName(t *testing.T) {
-	b := testBroker(t)
-
-	r := b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a", Name: "old-name"})
-	b.setName(SetNameRequest{ID: r.ID, Name: "new-name"})
-
-	peers := b.listPeers(ListPeersRequest{Scope: "all"})
-	if peers[0].Name != "new-name" {
-		t.Fatalf("expected name new-name, got %s", peers[0].Name)
-	}
-}
-
 func TestListPeersByScope(t *testing.T) {
 	b := testBroker(t)
 
-	b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/project-a", GitRoot: "/project-a"})
-	b.register(RegisterRequest{PID: 2, Machine: "m1", CWD: "/project-b", GitRoot: "/project-b"})
-	b.register(RegisterRequest{PID: 3, Machine: "m2", CWD: "/project-a", GitRoot: "/project-a"})
+	mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/project-a", GitRoot: "/project-a"})
+	mustRegister(t, b, RegisterRequest{PID: 2, Machine: "m1", CWD: "/project-b", GitRoot: "/project-b"})
+	mustRegister(t, b, RegisterRequest{PID: 3, Machine: "m2", CWD: "/project-a", GitRoot: "/project-a"})
 
 	all := b.listPeers(ListPeersRequest{Scope: "all"})
 	if len(all) != 3 {
@@ -177,7 +161,7 @@ func TestFleetMemory(t *testing.T) {
 func TestEvents(t *testing.T) {
 	b := testBroker(t)
 
-	b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
+	mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
 	events := b.recentEvents(10)
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))
@@ -187,33 +171,16 @@ func TestEvents(t *testing.T) {
 	}
 }
 
-func TestDuplicatePIDRegister(t *testing.T) {
-	b := testBroker(t)
-
-	b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
-	b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/b"})
-
-	peers := b.listPeers(ListPeersRequest{Scope: "all"})
-	if len(peers) != 1 {
-		t.Fatalf("expected 1 peer after re-register, got %d", len(peers))
-	}
-	if peers[0].CWD != "/b" {
-		t.Fatalf("expected CWD /b after re-register, got %s", peers[0].CWD)
-	}
-}
-
 func TestCleanStalePeers(t *testing.T) {
 	b := testBroker(t)
-	cfg.StaleTimeout = 1 // 1 second timeout for test
+	cfg.StaleTimeout = 1
 
-	r := b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
-	if r.ID == "" {
-		t.Fatal("expected peer ID")
+	id := mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
+	if id == "" {
+		t.Fatal("expected session ID")
 	}
 
-	// Force last_seen into the past.
 	b.db.Exec("UPDATE peers SET last_seen = ?", "2020-01-01T00:00:00Z")
-
 	b.cleanStalePeers()
 
 	peers := b.listPeers(ListPeersRequest{Scope: "all"})
@@ -226,8 +193,7 @@ func TestCleanStalePeersKeepsFresh(t *testing.T) {
 	b := testBroker(t)
 	cfg.StaleTimeout = 300
 
-	b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
-
+	mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
 	b.cleanStalePeers()
 
 	peers := b.listPeers(ListPeersRequest{Scope: "all"})
@@ -239,46 +205,14 @@ func TestCleanStalePeersKeepsFresh(t *testing.T) {
 func TestHeartbeat(t *testing.T) {
 	b := testBroker(t)
 
-	r := b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
+	id := mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
 
-	// Get initial last_seen.
-	peers := b.listPeers(ListPeersRequest{Scope: "all"})
-	initialLastSeen := peers[0].LastSeen
-
-	// Force last_seen into the past.
 	b.db.Exec("UPDATE peers SET last_seen = ?", "2020-01-01T00:00:00Z")
+	b.heartbeat(HeartbeatRequest{ID: id})
 
-	b.heartbeat(HeartbeatRequest{ID: r.ID})
-
-	peers = b.listPeers(ListPeersRequest{Scope: "all"})
+	peers := b.listPeers(ListPeersRequest{Scope: "all"})
 	if peers[0].LastSeen == "2020-01-01T00:00:00Z" {
 		t.Fatal("heartbeat did not update last_seen")
-	}
-	_ = initialLastSeen
-}
-
-func TestAckMessage(t *testing.T) {
-	b := testBroker(t)
-
-	r1 := b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
-	r2 := b.register(RegisterRequest{PID: 2, Machine: "m2", CWD: "/b"})
-
-	b.sendMessage(SendMessageRequest{FromID: r1.ID, ToID: r2.ID, Text: "hello"})
-
-	// Peek to get message ID without marking delivered.
-	peek := b.peekMessages(PollMessagesRequest{ID: r2.ID})
-	if len(peek.Messages) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(peek.Messages))
-	}
-	msgID := peek.Messages[0].ID
-
-	// Ack the message.
-	b.ackMessage(msgID)
-
-	// Poll should now return empty (message marked delivered).
-	poll := b.pollMessages(PollMessagesRequest{ID: r2.ID})
-	if len(poll.Messages) != 0 {
-		t.Fatalf("expected 0 messages after ack, got %d", len(poll.Messages))
 	}
 }
 
@@ -289,9 +223,9 @@ func TestPeerCount(t *testing.T) {
 		t.Fatalf("expected 0 peers initially, got %d", c)
 	}
 
-	b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
-	b.register(RegisterRequest{PID: 2, Machine: "m2", CWD: "/b"})
-	b.register(RegisterRequest{PID: 3, Machine: "m3", CWD: "/c"})
+	mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
+	mustRegister(t, b, RegisterRequest{PID: 2, Machine: "m2", CWD: "/b"})
+	mustRegister(t, b, RegisterRequest{PID: 3, Machine: "m3", CWD: "/c"})
 
 	if c := b.peerCount(); c != 3 {
 		t.Fatalf("expected 3 peers, got %d", c)
@@ -328,14 +262,14 @@ func TestNowISO(t *testing.T) {
 func TestListPeersExcludeID(t *testing.T) {
 	b := testBroker(t)
 
-	r1 := b.register(RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
-	b.register(RegisterRequest{PID: 2, Machine: "m2", CWD: "/b"})
+	s1 := mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/a"})
+	mustRegister(t, b, RegisterRequest{PID: 2, Machine: "m2", CWD: "/b"})
 
-	peers := b.listPeers(ListPeersRequest{Scope: "all", ExcludeID: r1.ID})
+	peers := b.listPeers(ListPeersRequest{Scope: "all", ExcludeID: s1})
 	if len(peers) != 1 {
 		t.Fatalf("expected 1 peer after excluding, got %d", len(peers))
 	}
-	if peers[0].ID == r1.ID {
+	if peers[0].ID == s1 {
 		t.Fatal("excluded peer should not appear")
 	}
 }

@@ -63,6 +63,33 @@ func loadBrokerRootToken(dir string) (string, error) {
 	return "", fmt.Errorf("token.jwt is not a root token and root-token.jwt does not exist")
 }
 
+// colMissing returns true if the given table does not exist or does not have
+// the named column. Used for one-shot schema migrations in newBroker().
+func colMissing(db *sql.DB, table, col string) bool {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return true // table doesn't exist
+	}
+	defer rows.Close()
+	found := false
+	any := false
+	for rows.Next() {
+		any = true
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk)
+		if name == col {
+			found = true
+		}
+	}
+	if !any {
+		return true // PRAGMA returned no rows -- table doesn't exist
+	}
+	return !found
+}
+
 func generatePeerID() string {
 	b := make([]byte, 4)
 	rand.Read(b)
@@ -84,34 +111,50 @@ func newBroker() (*Broker, error) {
 		return nil, err
 	}
 
+	// ADR-001: one-shot migration from the pre-rewrite schema. Only drops the
+	// old tables if they lack the new columns (agent_name on peers, to_agent
+	// on messages). Fresh deploys and upgraded deploys both end up at the
+	// same schema; subsequent restarts are no-ops (tables already correct).
+	if colMissing(db, "peers", "agent_name") {
+		db.Exec(`DROP TABLE IF EXISTS peers`)
+	}
+	if colMissing(db, "messages", "to_agent") {
+		db.Exec(`DROP TABLE IF EXISTS messages`)
+	}
+
 	for _, stmt := range []string{
 		`CREATE TABLE IF NOT EXISTS peers (
 			id TEXT PRIMARY KEY,
+			agent_name TEXT NOT NULL DEFAULT '',
 			pid INTEGER NOT NULL,
 			machine TEXT NOT NULL DEFAULT '',
 			cwd TEXT NOT NULL,
 			git_root TEXT,
 			tty TEXT,
-			name TEXT NOT NULL DEFAULT '',
 			project TEXT NOT NULL DEFAULT '',
 			branch TEXT NOT NULL DEFAULT '',
 			summary TEXT NOT NULL DEFAULT '',
-			registered_at TEXT NOT NULL,
+			started_at TEXT NOT NULL,
 			last_seen TEXT NOT NULL
 		)`,
-		// Migrations: add columns if missing (existing databases).
-		`ALTER TABLE peers ADD COLUMN machine TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE peers ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE peers ADD COLUMN project TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE peers ADD COLUMN branch TEXT NOT NULL DEFAULT ''`,
+		// Enforce agent_name uniqueness when non-empty.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_peers_agent_name
+		 ON peers(agent_name) WHERE agent_name != ''`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			from_id TEXT NOT NULL,
-			to_id TEXT NOT NULL,
+			to_agent TEXT NOT NULL DEFAULT '',
+			to_session TEXT NOT NULL DEFAULT '',
+			from_session TEXT NOT NULL,
+			from_agent TEXT NOT NULL DEFAULT '',
 			text TEXT NOT NULL,
 			sent_at TEXT NOT NULL,
-			delivered INTEGER NOT NULL DEFAULT 0
+			delivered_at TEXT,
+			ack_at TEXT,
+			ack_session TEXT,
+			attempts INTEGER NOT NULL DEFAULT 0
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_to_agent ON messages(to_agent) WHERE to_agent != ''`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_to_session ON messages(to_session) WHERE to_session != ''`,
 		`CREATE TABLE IF NOT EXISTS events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			type TEXT NOT NULL,
@@ -125,7 +168,7 @@ func newBroker() (*Broker, error) {
 			value TEXT NOT NULL
 		)`,
 	} {
-		db.Exec(stmt) // Ignore errors from ALTER (column already exists).
+		db.Exec(stmt)
 	}
 
 	b := &Broker{db: db, nats: newNATSPublisher()}
@@ -158,10 +201,12 @@ func newBroker() (*Broker, error) {
 		for {
 			b.cleanStalePeers()
 			db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-			db.Exec("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?",
+			// Acked messages: drop after 1 hour (audit window).
+			db.Exec("DELETE FROM messages WHERE ack_at IS NOT NULL AND ack_at < ?",
 				time.Now().UTC().Add(-1*time.Hour).Format(time.RFC3339))
-			db.Exec("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?",
-				time.Now().UTC().Add(-1*time.Hour).Format(time.RFC3339))
+			// Unacked/undelivered messages: dead-letter after 24 hours (queue TTL).
+			db.Exec("DELETE FROM messages WHERE ack_at IS NULL AND sent_at < ?",
+				time.Now().UTC().Add(-24*time.Hour).Format(time.RFC3339))
 			time.Sleep(30 * time.Second)
 		}
 	}()
@@ -201,39 +246,94 @@ func (b *Broker) recentEvents(limit int) []Event {
 	return events
 }
 
-// cleanStalePeers removes peers that haven't sent a heartbeat within the timeout.
+// cleanStalePeers removes sessions that haven't heartbeated within the timeout.
+// Also resets any agent-queued messages that were bound to the dead session
+// back into the queue so the next holder of that agent name receives them.
 func (b *Broker) cleanStalePeers() {
 	timeout := cfg.StaleTimeout
 	if timeout <= 0 {
 		timeout = 300
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(timeout) * time.Second).Format(time.RFC3339)
+
+	// Collect IDs of sessions we're about to delete so we can reset their messages.
+	rows, err := b.db.Query("SELECT id FROM peers WHERE last_seen < ?", cutoff)
+	var deadIDs []string
+	if err == nil {
+		for rows.Next() {
+			var id string
+			rows.Scan(&id)
+			deadIDs = append(deadIDs, id)
+		}
+		rows.Close()
+	}
+
+	// Delete stale peers -- agent names free immediately.
 	b.db.Exec("DELETE FROM peers WHERE last_seen < ?", cutoff)
+
+	// For each dead session: drop ephemeral messages, reset agent-queued messages.
+	for _, id := range deadIDs {
+		b.db.Exec("DELETE FROM messages WHERE to_session = ? AND to_agent = '' AND ack_at IS NULL", id)
+		b.db.Exec(
+			`UPDATE messages SET to_session = '', delivered_at = NULL
+			 WHERE to_session = ? AND to_agent != '' AND ack_at IS NULL`,
+			id,
+		)
+	}
+
 	eventCutoff := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
 	b.db.Exec("DELETE FROM events WHERE created_at < ?", eventCutoff)
 }
 
+// register starts a new session. If AgentName is provided and already held by
+// a live session, returns a conflict response (no silent disambiguation).
 func (b *Broker) register(req RegisterRequest) RegisterResponse {
-	id := generatePeerID()
 	now := nowISO()
 
-	// Remove stale registrations for same machine+tty (handles restarts with new PID)
-	// and same PID+machine (handles re-registration without restart).
-	if req.TTY != "" {
-		b.db.Exec("DELETE FROM peers WHERE machine = ? AND tty = ?", req.Machine, req.TTY)
+	// Uniqueness check: agent names are global, hard-unique, fail fast on collision.
+	if req.AgentName != "" {
+		var held Peer
+		var gitRoot, tty sql.NullString
+		err := b.db.QueryRow(
+			`SELECT id, machine, cwd, git_root, tty, started_at
+			 FROM peers WHERE agent_name = ? LIMIT 1`,
+			req.AgentName,
+		).Scan(&held.ID, &held.Machine, &held.CWD, &gitRoot, &tty, &held.RegisteredAt)
+		if err == nil {
+			return RegisterResponse{
+				OK:            false,
+				Error:         fmt.Sprintf("agent %q already held by session %s", req.AgentName, held.ID),
+				HeldBySession: held.ID,
+				HeldByMachine: held.Machine,
+				HeldByCWD:     held.CWD,
+				HeldBySince:   held.RegisteredAt,
+			}
+		}
 	}
-	b.db.Exec("DELETE FROM peers WHERE pid = ? AND machine = ?", req.PID, req.Machine)
 
+	id := generatePeerID()
 	b.db.Exec(
-		"INSERT INTO peers (id, pid, machine, cwd, git_root, tty, name, project, branch, summary, registered_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		id, req.PID, req.Machine, req.CWD, req.GitRoot, req.TTY, req.Name, req.Project, req.Branch, req.Summary, now, now,
+		`INSERT INTO peers (id, agent_name, pid, machine, cwd, git_root, tty, project, branch, summary, started_at, last_seen)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, req.AgentName, req.PID, req.Machine, req.CWD, req.GitRoot, req.TTY,
+		req.Project, req.Branch, req.Summary, now, now,
 	)
+
+	// Drain any queued messages addressed to this agent. These were sent while
+	// no session held the name; now that one has registered, they become deliverable.
+	if req.AgentName != "" {
+		b.db.Exec(
+			`UPDATE messages SET to_session = ? WHERE to_agent = ? AND to_session = '' AND delivered_at IS NULL`,
+			id, req.AgentName,
+		)
+	}
+
 	b.emitEvent("peer_joined", id, req.Machine, req.Summary)
 	b.nats.publish("fleet.peer.joined", FleetEvent{
 		Type: "peer_joined", PeerID: id, Machine: req.Machine,
 		Summary: req.Summary, CWD: req.CWD,
 	})
-	return RegisterResponse{ID: id}
+	return RegisterResponse{OK: true, ID: id}
 }
 
 func (b *Broker) heartbeat(req HeartbeatRequest) {
@@ -248,35 +348,32 @@ func (b *Broker) setSummary(req SetSummaryRequest) {
 	})
 }
 
-func (b *Broker) setName(req SetNameRequest) {
-	b.db.Exec("UPDATE peers SET name = ? WHERE id = ?", req.Name, req.ID)
-}
-
 func (b *Broker) listPeers(req ListPeersRequest) []Peer {
 	var query string
 	var args []any
 
+	cols := "id, agent_name, pid, machine, cwd, git_root, tty, project, branch, summary, started_at, last_seen"
 	switch req.Scope {
 	case "directory":
-		query = "SELECT id, pid, machine, cwd, git_root, tty, name, project, branch, summary, registered_at, last_seen FROM peers WHERE cwd = ?"
+		query = "SELECT " + cols + " FROM peers WHERE cwd = ?"
 		args = []any{req.CWD}
 	case "repo":
 		if req.GitRoot != "" {
-			query = "SELECT id, pid, machine, cwd, git_root, tty, name, project, branch, summary, registered_at, last_seen FROM peers WHERE git_root = ?"
+			query = "SELECT " + cols + " FROM peers WHERE git_root = ?"
 			args = []any{req.GitRoot}
 		} else {
-			query = "SELECT id, pid, machine, cwd, git_root, tty, name, project, branch, summary, registered_at, last_seen FROM peers WHERE cwd = ?"
+			query = "SELECT " + cols + " FROM peers WHERE cwd = ?"
 			args = []any{req.CWD}
 		}
 	case "machine":
 		if req.Machine != "" {
-			query = "SELECT id, pid, machine, cwd, git_root, tty, name, project, branch, summary, registered_at, last_seen FROM peers WHERE machine = ?"
+			query = "SELECT " + cols + " FROM peers WHERE machine = ?"
 			args = []any{req.Machine}
 		} else {
-			query = "SELECT id, pid, machine, cwd, git_root, tty, name, project, branch, summary, registered_at, last_seen FROM peers"
+			query = "SELECT " + cols + " FROM peers"
 		}
-	default: // "all" or empty = everything
-		query = "SELECT id, pid, machine, cwd, git_root, tty, name, project, branch, summary, registered_at, last_seen FROM peers"
+	default:
+		query = "SELECT " + cols + " FROM peers"
 	}
 
 	rows, err := b.db.Query(query, args...)
@@ -289,7 +386,8 @@ func (b *Broker) listPeers(req ListPeersRequest) []Peer {
 	for rows.Next() {
 		var p Peer
 		var gitRoot, tty sql.NullString
-		rows.Scan(&p.ID, &p.PID, &p.Machine, &p.CWD, &gitRoot, &tty, &p.Name, &p.Project, &p.Branch, &p.Summary, &p.RegisteredAt, &p.LastSeen)
+		rows.Scan(&p.ID, &p.AgentName, &p.PID, &p.Machine, &p.CWD, &gitRoot, &tty,
+			&p.Project, &p.Branch, &p.Summary, &p.RegisteredAt, &p.LastSeen)
 		p.GitRoot = gitRoot.String
 		p.TTY = tty.String
 
@@ -301,50 +399,87 @@ func (b *Broker) listPeers(req ListPeersRequest) []Peer {
 	return peers
 }
 
+// sendMessage routes a message either to a named agent or directly to a
+// session ID. Exactly one of ToAgent or ToSession must be set. Messages to
+// an agent with no live holder are queued; messages to a non-existent session
+// error out immediately.
 func (b *Broker) sendMessage(req SendMessageRequest) SendMessageResponse {
-	// Try exact ID match first.
-	var exists bool
-	b.db.QueryRow("SELECT EXISTS(SELECT 1 FROM peers WHERE id = ?)", req.ToID).Scan(&exists)
+	if (req.ToAgent == "") == (req.ToSession == "") {
+		return SendMessageResponse{OK: false, Error: "exactly one of to_agent or to_session must be set"}
+	}
 
-	// If ID not found, try resolving as a display name (handles ID rotation).
-	if !exists {
-		var resolvedID string
-		err := b.db.QueryRow(
-			"SELECT id FROM peers WHERE name = ? ORDER BY last_seen DESC LIMIT 1",
-			req.ToID,
-		).Scan(&resolvedID)
-		if err == nil && resolvedID != "" {
-			req.ToID = resolvedID
-			exists = true
+	now := nowISO()
+
+	// Look up sender's agent name (if any) for the from_agent field.
+	var fromAgent sql.NullString
+	b.db.QueryRow("SELECT agent_name FROM peers WHERE id = ?", req.FromID).Scan(&fromAgent)
+
+	var toSession, toAgent string
+	var queued bool
+
+	if req.ToSession != "" {
+		// Direct session targeting. Session must exist -- no queueing for ephemeral peers.
+		var exists bool
+		b.db.QueryRow("SELECT EXISTS(SELECT 1 FROM peers WHERE id = ?)", req.ToSession).Scan(&exists)
+		if !exists {
+			return SendMessageResponse{OK: false, Error: fmt.Sprintf("session %s not found", req.ToSession)}
+		}
+		toSession = req.ToSession
+	} else {
+		// Agent targeting. Find the session currently holding the name, if any.
+		toAgent = req.ToAgent
+		var holder string
+		err := b.db.QueryRow("SELECT id FROM peers WHERE agent_name = ? LIMIT 1", req.ToAgent).Scan(&holder)
+		if err == nil && holder != "" {
+			toSession = holder
+		} else {
+			queued = true // no live holder -- message sits on the agent queue
 		}
 	}
 
-	if !exists {
-		return SendMessageResponse{OK: false, Error: fmt.Sprintf("Peer %s not found (tried as ID and name)", req.ToID)}
-	}
-	b.db.Exec(
-		"INSERT INTO messages (from_id, to_id, text, sent_at, delivered) VALUES (?, ?, ?, ?, 0)",
-		req.FromID, req.ToID, req.Text, nowISO(),
+	result, err := b.db.Exec(
+		`INSERT INTO messages (to_agent, to_session, from_session, from_agent, text, sent_at, attempts)
+		 VALUES (?, ?, ?, ?, ?, ?, 0)`,
+		toAgent, toSession, req.FromID, fromAgent.String, req.Text, now,
 	)
+	if err != nil {
+		return SendMessageResponse{OK: false, Error: err.Error()}
+	}
+	msgID, _ := result.LastInsertId()
 
-	// Log message content (truncated) for audit trail.
 	msgPreview := req.Text
 	if len(msgPreview) > 500 {
 		msgPreview = msgPreview[:500] + "..."
 	}
-	eventData := fmt.Sprintf("to=%s text=%s", req.ToID, msgPreview)
+	target := toAgent
+	if target == "" {
+		target = toSession
+	}
+	eventData := fmt.Sprintf("to=%s text=%s", target, msgPreview)
 	b.emitEvent("message_sent", req.FromID, "", eventData)
 
 	b.nats.publish("fleet.message", FleetEvent{
-		Type: "message_sent", PeerID: req.FromID, Data: req.ToID,
+		Type: "message_sent", PeerID: req.FromID, Data: target,
 	})
-	return SendMessageResponse{OK: true}
+	return SendMessageResponse{OK: true, MessageID: int(msgID), Queued: queued}
 }
 
+// pollMessages returns undelivered messages addressed to the session directly
+// OR to any agent name the session currently holds. Messages returned here are
+// marked delivered_at but not ack_at -- the caller should ack each one, or
+// they will be surfaced again on the next poll after a retry window.
 func (b *Broker) pollMessages(req PollMessagesRequest) PollMessagesResponse {
+	// Look up agent name for the caller so we can drain the queue.
+	var agentName sql.NullString
+	b.db.QueryRow("SELECT agent_name FROM peers WHERE id = ?", req.ID).Scan(&agentName)
+
 	rows, err := b.db.Query(
-		"SELECT id, from_id, to_id, text, sent_at FROM messages WHERE to_id = ? AND delivered = 0 ORDER BY sent_at ASC",
-		req.ID,
+		`SELECT id, to_agent, to_session, from_session, from_agent, text, sent_at, attempts
+		 FROM messages
+		 WHERE delivered_at IS NULL
+		   AND (to_session = ? OR (to_agent != '' AND to_agent = ?))
+		 ORDER BY sent_at ASC`,
+		req.ID, agentName.String,
 	)
 	if err != nil {
 		return PollMessagesResponse{Messages: []Message{}}
@@ -354,12 +489,18 @@ func (b *Broker) pollMessages(req PollMessagesRequest) PollMessagesResponse {
 	var msgs []Message
 	for rows.Next() {
 		var m Message
-		rows.Scan(&m.ID, &m.FromID, &m.ToID, &m.Text, &m.SentAt)
+		rows.Scan(&m.ID, &m.ToAgent, &m.ToSession, &m.FromSession, &m.FromAgent, &m.Text, &m.SentAt, &m.Attempts)
 		msgs = append(msgs, m)
 	}
 
+	now := nowISO()
 	for _, m := range msgs {
-		b.db.Exec("UPDATE messages SET delivered = 1 WHERE id = ?", m.ID)
+		// Mark delivered (visible to caller) and bind to this session so ack can verify.
+		// Not acked yet -- if no ack arrives, retry logic can reset delivered_at.
+		b.db.Exec(
+			`UPDATE messages SET delivered_at = ?, to_session = ?, attempts = attempts + 1 WHERE id = ?`,
+			now, req.ID, m.ID,
+		)
 	}
 
 	if msgs == nil {
@@ -371,9 +512,16 @@ func (b *Broker) pollMessages(req PollMessagesRequest) PollMessagesResponse {
 // peekMessages returns undelivered messages without marking them delivered.
 // Used by the background poll loop -- messages stay available for check_messages.
 func (b *Broker) peekMessages(req PollMessagesRequest) PollMessagesResponse {
+	var agentName sql.NullString
+	b.db.QueryRow("SELECT agent_name FROM peers WHERE id = ?", req.ID).Scan(&agentName)
+
 	rows, err := b.db.Query(
-		"SELECT id, from_id, to_id, text, sent_at FROM messages WHERE to_id = ? AND delivered = 0 ORDER BY sent_at ASC",
-		req.ID,
+		`SELECT id, to_agent, to_session, from_session, from_agent, text, sent_at, attempts
+		 FROM messages
+		 WHERE delivered_at IS NULL
+		   AND (to_session = ? OR (to_agent != '' AND to_agent = ?))
+		 ORDER BY sent_at ASC`,
+		req.ID, agentName.String,
 	)
 	if err != nil {
 		return PollMessagesResponse{Messages: []Message{}}
@@ -383,7 +531,7 @@ func (b *Broker) peekMessages(req PollMessagesRequest) PollMessagesResponse {
 	var msgs []Message
 	for rows.Next() {
 		var m Message
-		rows.Scan(&m.ID, &m.FromID, &m.ToID, &m.Text, &m.SentAt)
+		rows.Scan(&m.ID, &m.ToAgent, &m.ToSession, &m.FromSession, &m.FromAgent, &m.Text, &m.SentAt, &m.Attempts)
 		msgs = append(msgs, m)
 	}
 	if msgs == nil {
@@ -392,8 +540,13 @@ func (b *Broker) peekMessages(req PollMessagesRequest) PollMessagesResponse {
 	return PollMessagesResponse{Messages: msgs}
 }
 
-func (b *Broker) ackMessage(messageID int) {
-	b.db.Exec("UPDATE messages SET delivered = 1 WHERE id = ?", messageID)
+// ackMessage confirms a client successfully received a message. Only after
+// ack is the message permanently marked as delivered (ack_at set).
+func (b *Broker) ackMessage(req AckMessageRequest) {
+	b.db.Exec(
+		`UPDATE messages SET ack_at = ?, ack_session = ? WHERE id = ? AND to_session = ?`,
+		nowISO(), req.SessionID, req.MessageID, req.SessionID,
+	)
 }
 
 func (b *Broker) unregister(req UnregisterRequest) {
@@ -401,8 +554,17 @@ func (b *Broker) unregister(req UnregisterRequest) {
 	b.nats.publish("fleet.peer.left", FleetEvent{
 		Type: "peer_left", PeerID: req.ID,
 	})
+	// Delete session. Agent name frees immediately.
 	b.db.Exec("DELETE FROM peers WHERE id = ?", req.ID)
-	b.db.Exec("DELETE FROM messages WHERE to_id = ? AND delivered = 0", req.ID)
+	// Drop direct-to-session messages (no agent queue to keep them alive).
+	b.db.Exec("DELETE FROM messages WHERE to_session = ? AND to_agent = '' AND ack_at IS NULL", req.ID)
+	// For agent-queued messages delivered to this session but not yet acked,
+	// reset them so the next holder of the agent sees them.
+	b.db.Exec(
+		`UPDATE messages SET to_session = '', delivered_at = NULL
+		 WHERE to_session = ? AND to_agent != '' AND ack_at IS NULL`,
+		req.ID,
+	)
 }
 
 func (b *Broker) setFleetMemory(content string) {
@@ -563,7 +725,15 @@ func runBroker(ctx context.Context) error {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		writeJSON(w, b.register(req))
+		resp := b.register(req)
+		if !resp.OK {
+			// Agent-name collision -- return 409 with the conflict block as JSON.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		writeJSON(w, resp)
 	}))
 
 	mux.HandleFunc("POST /heartbeat", requireCapability("peer/heartbeat", func(w http.ResponseWriter, r *http.Request) {
@@ -586,13 +756,13 @@ func runBroker(ctx context.Context) error {
 		writeJSON(w, map[string]bool{"ok": true})
 	}))
 
-	mux.HandleFunc("POST /set-name", requireCapability("peer/set-summary", func(w http.ResponseWriter, r *http.Request) {
-		req, err := decodeBody[SetNameRequest](r)
+	mux.HandleFunc("POST /ack-message", requireCapability("msg/ack", func(w http.ResponseWriter, r *http.Request) {
+		req, err := decodeBody[AckMessageRequest](r)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		b.setName(req)
+		b.ackMessage(req)
 		writeJSON(w, map[string]bool{"ok": true})
 	}))
 
@@ -649,17 +819,6 @@ func runBroker(ctx context.Context) error {
 		writeJSON(w, b.peekMessages(req))
 	}))
 
-	mux.HandleFunc("POST /ack-message", requireCapability("msg/ack", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			MessageID int `json:"message_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-		b.ackMessage(req.MessageID)
-		writeJSON(w, map[string]bool{"ok": true})
-	}))
 
 	mux.HandleFunc("POST /unregister", requireCapability("peer/unregister", func(w http.ResponseWriter, r *http.Request) {
 		req, err := decodeBody[UnregisterRequest](r)
