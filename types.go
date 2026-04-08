@@ -119,6 +119,26 @@ type AckMessageRequest struct {
 	MessageID int    `json:"message_id"`
 }
 
+// ClaimAgentRequest lets a live session claim an agent name post-registration.
+// Used by the MCP `claim_agent_name` tool so users can name sessions without
+// restarting them. Still subject to the global uniqueness rule -- if the name
+// is held by another live session, returns the same conflict block as register.
+// A session can only claim once: sessions that already have an agent_name get
+// an error (identity is explicit, mutation is not allowed).
+type ClaimAgentRequest struct {
+	SessionID string `json:"session_id"`
+	AgentName string `json:"agent_name"`
+}
+
+type ClaimAgentResponse struct {
+	OK            bool   `json:"ok"`
+	Error         string `json:"error,omitempty"`
+	HeldBySession string `json:"held_by_session,omitempty"`
+	HeldByMachine string `json:"held_by_machine,omitempty"`
+	HeldByCWD     string `json:"held_by_cwd,omitempty"`
+	HeldBySince   string `json:"held_by_since,omitempty"`
+}
+
 type UnregisterRequest struct {
 	ID string `json:"id"`
 }

@@ -163,6 +163,20 @@ var mcpTools = []map[string]any{
 			"properties": map[string]any{},
 		},
 	},
+	{
+		"name":        "claim_agent_name",
+		"description": "Claim a stable agent name for THIS session without restarting. Use this when the user tells you to call yourself something (e.g. 'you are jim'), or when you want an addressable stable handle. Names are globally unique while held -- if another session already holds the name, you get a 409 with the holder's info. A session can only claim once; after that, the name is stuck. Preferred over restarting with --as when the session is already mid-work.",
+		"inputSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "The agent name to claim (e.g. 'jim', 'caretaker'). Must be unique across the fleet.",
+				},
+			},
+			"required": []string{"name"},
+		},
+	},
 }
 
 var mcpInstructions = `You are connected to the claude-peers network. Other Claude Code sessions across the fleet can see you and send you messages.
@@ -182,7 +196,8 @@ TOOLS:
 - list_peers: Discover sessions on the network (scope: all/machine/directory/repo).
 - send_message(to, message): Send a message. "to" is an agent name or session ID.
 - set_summary: Set a 1-2 sentence summary of your current work.
-- check_messages: Drain undelivered messages (fallback -- push is the normal path).`
+- check_messages: Drain undelivered messages (fallback -- push is the normal path).
+- claim_agent_name(name): Claim a stable agent name for THIS session without restarting. Use when the user says "you are X" or "call yourself X". Names are globally unique while held. A session can only claim once.`
 
 func handleInitialize(id any, t *MCPTransport) {
 	// Build dynamic instructions with fleet context injection.

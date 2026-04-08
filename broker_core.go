@@ -194,20 +194,23 @@ func newBroker() (*Broker, error) {
 		b.fleetMemory = mem.String
 	}
 
-	// Periodic WAL checkpoint + stale cleanup (skip first run)
-	staleTimeout := time.Duration(cfg.StaleTimeout) * time.Second
+	// Periodic stale cleanup. Runs every 2 seconds so dead peers are evicted
+	// within a few seconds of their last heartbeat crossing the staleTimeout
+	// threshold. WAL checkpoint + message cleanup still run, just on a slower
+	// cadence (every 30 sweeps == 1 minute) since those are heavier ops.
 	go func() {
-		time.Sleep(staleTimeout)
+		var tick int
 		for {
 			b.cleanStalePeers()
-			db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-			// Acked messages: drop after 1 hour (audit window).
-			db.Exec("DELETE FROM messages WHERE ack_at IS NOT NULL AND ack_at < ?",
-				time.Now().UTC().Add(-1*time.Hour).Format(time.RFC3339))
-			// Unacked/undelivered messages: dead-letter after 24 hours (queue TTL).
-			db.Exec("DELETE FROM messages WHERE ack_at IS NULL AND sent_at < ?",
-				time.Now().UTC().Add(-24*time.Hour).Format(time.RFC3339))
-			time.Sleep(30 * time.Second)
+			tick++
+			if tick%30 == 0 {
+				db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+				db.Exec("DELETE FROM messages WHERE ack_at IS NOT NULL AND ack_at < ?",
+					time.Now().UTC().Add(-1*time.Hour).Format(time.RFC3339))
+				db.Exec("DELETE FROM messages WHERE ack_at IS NULL AND sent_at < ?",
+					time.Now().UTC().Add(-24*time.Hour).Format(time.RFC3339))
+			}
+			time.Sleep(2 * time.Second)
 		}
 	}()
 
@@ -252,7 +255,7 @@ func (b *Broker) recentEvents(limit int) []Event {
 func (b *Broker) cleanStalePeers() {
 	timeout := cfg.StaleTimeout
 	if timeout <= 0 {
-		timeout = 300
+		timeout = 20
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(timeout) * time.Second).Format(time.RFC3339)
 
@@ -540,6 +543,66 @@ func (b *Broker) peekMessages(req PollMessagesRequest) PollMessagesResponse {
 	return PollMessagesResponse{Messages: msgs}
 }
 
+// claimAgent lets a live session adopt an agent name post-registration.
+// Subject to the same uniqueness rule as register. A session may claim exactly
+// once -- if it already has a name, this returns an error (no runtime rename).
+// On success, any messages queued for the claimed agent name drain to this
+// session immediately, same as register.
+func (b *Broker) claimAgent(req ClaimAgentRequest) ClaimAgentResponse {
+	if req.AgentName == "" {
+		return ClaimAgentResponse{OK: false, Error: "agent_name is required"}
+	}
+
+	// Session must exist.
+	var currentName sql.NullString
+	err := b.db.QueryRow("SELECT agent_name FROM peers WHERE id = ?", req.SessionID).Scan(&currentName)
+	if err != nil {
+		return ClaimAgentResponse{OK: false, Error: fmt.Sprintf("session %s not found", req.SessionID)}
+	}
+
+	// A session can only claim once. Re-claim or rename is intentionally rejected.
+	if currentName.String != "" {
+		return ClaimAgentResponse{
+			OK:    false,
+			Error: fmt.Sprintf("session %s already has agent name %q -- cannot re-claim", req.SessionID, currentName.String),
+		}
+	}
+
+	// Uniqueness check: is the target name held by another live session?
+	var held Peer
+	var gitRoot, tty sql.NullString
+	err = b.db.QueryRow(
+		`SELECT id, machine, cwd, git_root, tty, started_at
+		 FROM peers WHERE agent_name = ? LIMIT 1`,
+		req.AgentName,
+	).Scan(&held.ID, &held.Machine, &held.CWD, &gitRoot, &tty, &held.RegisteredAt)
+	if err == nil {
+		return ClaimAgentResponse{
+			OK:            false,
+			Error:         fmt.Sprintf("agent %q already held by session %s", req.AgentName, held.ID),
+			HeldBySession: held.ID,
+			HeldByMachine: held.Machine,
+			HeldByCWD:     held.CWD,
+			HeldBySince:   held.RegisteredAt,
+		}
+	}
+
+	// Claim the name.
+	b.db.Exec("UPDATE peers SET agent_name = ? WHERE id = ?", req.AgentName, req.SessionID)
+
+	// Drain any queued messages for this agent name.
+	b.db.Exec(
+		`UPDATE messages SET to_session = ? WHERE to_agent = ? AND to_session = '' AND delivered_at IS NULL`,
+		req.SessionID, req.AgentName,
+	)
+
+	b.emitEvent("agent_claimed", req.SessionID, "", req.AgentName)
+	b.nats.publish("fleet.agent.claimed", FleetEvent{
+		Type: "agent_claimed", PeerID: req.SessionID, Data: req.AgentName,
+	})
+	return ClaimAgentResponse{OK: true}
+}
+
 // ackMessage confirms a client successfully received a message. Only after
 // ack is the message permanently marked as delivered (ack_at set).
 func (b *Broker) ackMessage(req AckMessageRequest) {
@@ -764,6 +827,27 @@ func runBroker(ctx context.Context) error {
 		}
 		b.ackMessage(req)
 		writeJSON(w, map[string]bool{"ok": true})
+	}))
+
+	mux.HandleFunc("POST /claim-agent", requireCapability("peer/set-summary", func(w http.ResponseWriter, r *http.Request) {
+		req, err := decodeBody[ClaimAgentRequest](r)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		resp := b.claimAgent(req)
+		if !resp.OK {
+			w.Header().Set("Content-Type", "application/json")
+			// 409 if collision, 400 if already-claimed or missing name.
+			if resp.HeldBySession != "" {
+				w.WriteHeader(http.StatusConflict)
+			} else {
+				w.WriteHeader(http.StatusBadRequest)
+			}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		writeJSON(w, resp)
 	}))
 
 	mux.HandleFunc("POST /list-peers", requireCapability("peer/list", func(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -463,6 +464,32 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 		}
 		toolResult(id, t, "Summary updated: %q", args.Summary)
 
+	case "claim_agent_name":
+		var args struct {
+			Name string `json:"name"`
+		}
+		json.Unmarshal(call.Arguments, &args)
+		if args.Name == "" {
+			toolError(id, t, "name is required")
+			return
+		}
+		var resp ClaimAgentResponse
+		err := brokerFetch("/claim-agent", ClaimAgentRequest{SessionID: myID, AgentName: args.Name}, &resp)
+		if err != nil {
+			toolError(id, t, "Error claiming agent name: %v", err)
+			return
+		}
+		if !resp.OK {
+			if resp.HeldBySession != "" {
+				toolError(id, t, "Cannot claim %q: %s\n  held by session %s on %s (cwd: %s)\n  started: %s",
+					args.Name, resp.Error, resp.HeldBySession, resp.HeldByMachine, resp.HeldByCWD, resp.HeldBySince)
+			} else {
+				toolError(id, t, "Cannot claim %q: %s", args.Name, resp.Error)
+			}
+			return
+		}
+		toolResult(id, t, "Claimed agent name: %s. Other sessions can now address this session as %q across restarts (as long as this session holds the name).", args.Name, args.Name)
+
 	case "check_messages":
 		var resp PollMessagesResponse
 		err := brokerFetch("/poll-messages", PollMessagesRequest{ID: myID}, &resp)
@@ -573,10 +600,13 @@ func pollAndPush(myID, cwd, root string, t *MCPTransport) {
 		}
 		fromPeer := peerByID[msg.FromSession]
 
+		// IMPORTANT: channel protocol requires meta to be map[string]string.
+		// Claude Code silently drops notifications where any meta value is not
+		// a string, including numeric IDs. Stringify everything.
 		t.writeNotification("notifications/claude/channel", map[string]any{
 			"content": msg.Text,
-			"meta": map[string]any{
-				"message_id":   msg.ID,
+			"meta": map[string]string{
+				"message_id":   strconv.Itoa(msg.ID),
 				"from_agent":   msg.FromAgent,
 				"from_session": msg.FromSession,
 				"from_machine": fromPeer.Machine,

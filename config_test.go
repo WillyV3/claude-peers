@@ -14,8 +14,8 @@ func TestDefaultConfig(t *testing.T) {
 	if c.BrokerURL != "http://127.0.0.1:7899" {
 		t.Fatalf("expected default broker URL, got %s", c.BrokerURL)
 	}
-	if c.StaleTimeout != 300 {
-		t.Fatalf("expected stale timeout 300, got %d", c.StaleTimeout)
+	if c.StaleTimeout != 20 {
+		t.Fatalf("expected stale timeout 20, got %d", c.StaleTimeout)
 	}
 	if c.MachineName == "" {
 		t.Fatal("expected machine name from hostname")

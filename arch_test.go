@@ -266,6 +266,69 @@ func TestT9_GracefulUnregisterFreesName(t *testing.T) {
 	}
 }
 
+// T11: claim_agent_name -- an ephemeral session can adopt a name
+// post-registration. Covers happy path, uniqueness enforcement, re-claim
+// rejection, and queue drain on claim (same as register-time declaration).
+func TestT11_ClaimAgentNameLateBinding(t *testing.T) {
+	b := testBroker(t)
+
+	// Two ephemeral sessions exist in the same "cwd" with no declared name.
+	s1 := mustRegister(t, b, RegisterRequest{PID: 1, Machine: "m1", CWD: "/shared"})
+	s2 := mustRegister(t, b, RegisterRequest{PID: 2, Machine: "m1", CWD: "/shared"})
+
+	// An earlier sender queues a message for agent "worker" (before anyone claims it).
+	sender := mustRegister(t, b, RegisterRequest{AgentName: "sender", PID: 3, Machine: "m2", CWD: "/a"})
+	send := b.sendMessage(SendMessageRequest{FromID: sender, ToAgent: "worker", Text: "queued before claim"})
+	if !send.OK || !send.Queued {
+		t.Fatalf("pre-claim send should queue, got %+v", send)
+	}
+
+	// s1 claims "worker" -- should succeed and drain the queued message.
+	claim1 := b.claimAgent(ClaimAgentRequest{SessionID: s1, AgentName: "worker"})
+	if !claim1.OK {
+		t.Fatalf("s1 claim should succeed, got err=%s", claim1.Error)
+	}
+
+	// s1 polls and finds the message that was queued before claim.
+	poll := b.pollMessages(PollMessagesRequest{ID: s1})
+	if len(poll.Messages) != 1 || poll.Messages[0].Text != "queued before claim" {
+		t.Fatalf("s1 should drain queued message after claim, got %+v", poll.Messages)
+	}
+
+	// s2 tries to claim "worker" too -- collision, must return conflict block.
+	claim2 := b.claimAgent(ClaimAgentRequest{SessionID: s2, AgentName: "worker"})
+	if claim2.OK {
+		t.Fatal("s2 claim of held name should fail")
+	}
+	if claim2.HeldBySession != s1 {
+		t.Fatalf("HeldBySession should point to s1, got %s", claim2.HeldBySession)
+	}
+
+	// s2 claims "other" -- succeeds.
+	claim3 := b.claimAgent(ClaimAgentRequest{SessionID: s2, AgentName: "other"})
+	if !claim3.OK {
+		t.Fatalf("s2 claim of 'other' should succeed, got err=%s", claim3.Error)
+	}
+
+	// s2 tries to re-claim (rename) -- rejected. Identity is explicit, no mutation.
+	claim4 := b.claimAgent(ClaimAgentRequest{SessionID: s2, AgentName: "different"})
+	if claim4.OK {
+		t.Fatal("re-claim should be rejected; a session can only claim once")
+	}
+
+	// Claim with empty name: rejected.
+	claim5 := b.claimAgent(ClaimAgentRequest{SessionID: s1, AgentName: ""})
+	if claim5.OK {
+		t.Fatal("empty name should be rejected")
+	}
+
+	// Claim for non-existent session: rejected.
+	claim6 := b.claimAgent(ClaimAgentRequest{SessionID: "nonexistent", AgentName: "ghost"})
+	if claim6.OK {
+		t.Fatal("claim for nonexistent session should fail")
+	}
+}
+
 // T10: Restart continuity -- agent "jim" sends, dies gracefully, reconnects,
 // queued messages for him while away are delivered on the new session.
 func TestT10_RestartContinuity(t *testing.T) {

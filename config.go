@@ -123,7 +123,7 @@ func defaultConfig() Config {
 		Listen:       "127.0.0.1:7899",
 		MachineName:  hostname,
 		DBPath:       defaultDBPath(),
-		StaleTimeout: 300,
+		StaleTimeout: 20,
 		NatsURL:      "",
 		LLMBaseURL:   "http://127.0.0.1:4000/v1",
 		LLMModel:     "claude-haiku",
