@@ -669,6 +669,16 @@ func stripPort(addr string) string {
 	return host
 }
 
+// shortKID returns a short prefix of a peer pubkey string for scannable
+// logs. Full pubkeys are 64+ chars; tailing journalctl should never leak
+// complete audience identities in plain text.
+func shortKID(s string) string {
+	if len(s) <= 8 {
+		return s
+	}
+	return s[:8]
+}
+
 func runBroker(ctx context.Context) error {
 	b, err := newBroker()
 	if err != nil {
@@ -698,6 +708,7 @@ func runBroker(ctx context.Context) error {
 			return
 		}
 		sig := ed25519.Sign(kp.PrivateKey, []byte(req.Nonce))
+		log.Printf("[challenge] ip=%s", stripPort(r.RemoteAddr))
 		writeJSON(w, ChallengeResponse{
 			Nonce:     req.Nonce,
 			Signature: base64.RawURLEncoding.EncodeToString(sig),
@@ -706,18 +717,27 @@ func runBroker(ctx context.Context) error {
 	})
 
 	mux.HandleFunc("POST /refresh-token", func(w http.ResponseWriter, r *http.Request) {
+		// Every branch of this handler logs. Before T3+log-patch the
+		// handler was completely silent (middleware bypass at
+		// auth_middleware.go plus zero log.Printf here) which left
+		// refresh-token flows unobservable in journalctl.
+		ip := stripPort(r.RemoteAddr)
+
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
+			log.Printf("[refresh] status=denied ip=%s reason=no_auth_header", ip)
 			writeAuthError(w, http.StatusUnauthorized, "missing authorization header", "NO_AUTH")
 			return
 		}
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 		if tokenStr == authHeader {
+			log.Printf("[refresh] status=denied ip=%s reason=no_bearer_prefix", ip)
 			writeAuthError(w, http.StatusUnauthorized, "missing bearer token", "NO_AUTH")
 			return
 		}
 
 		if b.validator == nil {
+			log.Printf("[refresh] status=error ip=%s reason=no_validator", ip)
 			http.Error(w, "broker has no validator", 500)
 			return
 		}
@@ -727,6 +747,7 @@ func runBroker(ctx context.Context) error {
 		if err != nil {
 			claims, err = b.validator.ValidateWithGrace(tokenStr, time.Hour)
 			if err != nil {
+				log.Printf("[refresh] status=denied ip=%s reason=token_expired_beyond_grace err=%v", ip, err)
 				writeAuthError(w, http.StatusUnauthorized, err.Error(), "TOKEN_EXPIRED")
 				return
 			}
@@ -735,33 +756,40 @@ func runBroker(ctx context.Context) error {
 		// Load broker keypair to mint a new delegated token.
 		kp, err := LoadKeyPair(configDir())
 		if err != nil {
+			log.Printf("[refresh] status=error ip=%s reason=no_keypair err=%v", ip, err)
 			http.Error(w, "broker has no keypair", 500)
 			return
 		}
 
 		// The token's audience is the intended recipient (the machine's public key).
 		if len(claims.Audience) == 0 {
+			log.Printf("[refresh] status=denied ip=%s reason=no_audience", ip)
 			writeAuthError(w, http.StatusBadRequest, "token has no audience", "INVALID_TOKEN")
 			return
 		}
+		aud := shortKID(claims.Audience[0])
 		audiencePub, err := pubKeyFromString(claims.Audience[0])
 		if err != nil {
+			log.Printf("[refresh] status=denied aud=%s ip=%s reason=bad_audience_key", aud, ip)
 			writeAuthError(w, http.StatusBadRequest, "invalid audience key", "INVALID_TOKEN")
 			return
 		}
 		// Refuse to refresh a root token (issuer == audience).
 		issuerPub, err := pubKeyFromString(claims.Issuer)
 		if err != nil {
+			log.Printf("[refresh] status=denied aud=%s ip=%s reason=bad_issuer_key", aud, ip)
 			writeAuthError(w, http.StatusBadRequest, "invalid issuer key", "INVALID_TOKEN")
 			return
 		}
 		if issuerPub.Equal(audiencePub) {
+			log.Printf("[refresh] status=denied aud=%s ip=%s reason=root_token_refused", aud, ip)
 			writeAuthError(w, http.StatusForbidden, "root tokens cannot be refreshed via this endpoint", "ROOT_TOKEN")
 			return
 		}
 
 		parentToken, err := loadBrokerRootToken(configDir())
 		if err != nil {
+			log.Printf("[refresh] status=error aud=%s ip=%s reason=no_parent_root err=%v", aud, ip, err)
 			http.Error(w, "broker root token unavailable", 500)
 			return
 		}
@@ -770,8 +798,10 @@ func runBroker(ctx context.Context) error {
 		// stays 30d after refresh. Before T3 this was hardcoded to 24h,
 		// which meant every refresh dropped peers back onto the 24h
 		// rotation treadmill even if they started with a long token.
-		newToken, err := MintToken(kp.PrivateKey, audiencePub, claims.Capabilities, defaultChildTTL(), parentToken)
+		ttl := defaultChildTTL()
+		newToken, err := MintToken(kp.PrivateKey, audiencePub, claims.Capabilities, ttl, parentToken)
 		if err != nil {
+			log.Printf("[refresh] status=error aud=%s ip=%s reason=mint_failed err=%v", aud, ip, err)
 			http.Error(w, fmt.Sprintf("mint token: %v", err), 500)
 			return
 		}
@@ -779,6 +809,8 @@ func runBroker(ctx context.Context) error {
 		// Register the new token in the validator so it's immediately usable.
 		b.validator.RegisterToken(newToken, claims.Capabilities)
 
+		newExp := time.Now().Add(ttl).UTC().Format(time.RFC3339)
+		log.Printf("[refresh] status=granted aud=%s ip=%s ttl=%s new_exp=%s", aud, ip, ttl, newExp)
 		writeJSON(w, map[string]string{"token": newToken})
 	})
 
