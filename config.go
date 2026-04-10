@@ -55,6 +55,14 @@ type Config struct {
 
 	// LLMAPIKey is the API key for the LLM endpoint (used for summary generation).
 	LLMAPIKey string `json:"llm_api_key"`
+
+	// DefaultChildTTL is the default lifetime for child tokens minted by the
+	// broker — used by both `issue-token` (when no --ttl flag is passed) and
+	// by the POST /refresh-token endpoint. Accepts Go durations ("24h",
+	// "72h30m") or day shorthand ("30d"). Defaults to "24h" when unset for
+	// backward compatibility with pre-T3 installs. Set to "30d" or similar
+	// to stop the rotation treadmill for always-on peers.
+	DefaultChildTTL string `json:"default_child_ttl"`
 }
 
 // cfg is the global config, loaded once at startup.
@@ -103,6 +111,9 @@ func loadConfig() Config {
 	if v := os.Getenv("CLAUDE_PEERS_NATS_NKEY"); v != "" {
 		c.NatsNKeySeed = v
 	}
+	if v := os.Getenv("CLAUDE_PEERS_DEFAULT_TTL"); v != "" {
+		c.DefaultChildTTL = v
+	}
 
 	// Legacy env var
 	if v := os.Getenv("CLAUDE_PEERS_PORT"); v != "" {
@@ -123,10 +134,11 @@ func defaultConfig() Config {
 		Listen:       "127.0.0.1:7899",
 		MachineName:  hostname,
 		DBPath:       defaultDBPath(),
-		StaleTimeout: 20,
-		NatsURL:      "",
-		LLMBaseURL:   "http://127.0.0.1:4000/v1",
-		LLMModel:     "claude-haiku",
+		StaleTimeout:    20,
+		NatsURL:         "",
+		LLMBaseURL:      "http://127.0.0.1:4000/v1",
+		LLMModel:        "claude-haiku",
+		DefaultChildTTL: "24h",
 	}
 }
 

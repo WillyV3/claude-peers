@@ -86,6 +86,10 @@ Then issue tokens for each machine:
 # On the broker
 claude-peers issue-token /path/to/remote-identity.pub peer-session
 
+# Long-lived token for always-on peers (voice devices, daemons) —
+# 30 days instead of the 24h default, kills the rotation treadmill:
+claude-peers issue-token --ttl 30d /path/to/remote-identity.pub peer-session
+
 # On the remote machine
 claude-peers save-token <jwt>
 ```
@@ -110,11 +114,19 @@ claude-peers kill-broker                   Stop the broker
 ### Token Management
 
 ```
-claude-peers issue-token <pub> <role>      Issue a token for a machine
-claude-peers save-token <jwt>              Save a token locally
-claude-peers refresh-token                 Renew an expiring token
-claude-peers mint-root                     Mint a new root token
+claude-peers issue-token [--ttl D] <pub> <role>   Issue a token (default 24h)
+claude-peers save-token <jwt>                     Save a token locally
+claude-peers refresh-token                        Renew an expiring token
+claude-peers mint-root                            Mint a new root token
 ```
+
+`--ttl` accepts Go durations (`24h`, `72h30m`) or day shorthand (`30d`). Max
+is `365d` (the root token's own lifetime). The default is taken from
+`default_child_ttl` in `config.json` or `CLAUDE_PEERS_DEFAULT_TTL`, and falls
+back to `24h`. Set it to `30d` on always-on brokers to make `refresh-token`
+and freshly-issued tokens all land at 30 days instead of 24 hours — this is
+what kills the rotation treadmill that would otherwise brick voice peers
+every day.
 
 ## Configuration
 
@@ -126,6 +138,7 @@ Config: `~/.config/claude-peers/config.json`
 | `CLAUDE_PEERS_MACHINE` | Machine name |
 | `CLAUDE_PEERS_NATS` | NATS server URL (optional) |
 | `CLAUDE_PEERS_LLM_URL` | LLM endpoint for auto-summaries (optional) |
+| `CLAUDE_PEERS_DEFAULT_TTL` | Default child-token TTL (e.g. `30d`, default `24h`) |
 
 ## Auth
 

@@ -134,7 +134,7 @@ Usage:
   claude-peers status                           Show broker status and all peers
   claude-peers peers                            List all peers
   claude-peers send <id> <msg>                  Send a message to a peer
-  claude-peers issue-token <pub-path> <role>    Issue a UCAN token for a machine
+  claude-peers issue-token [--ttl D] <pub> <role>  Issue a UCAN token (default 24h; "30d", "720h", etc)
   claude-peers save-token <jwt>                 Save a UCAN token locally
   claude-peers refresh-token                    Renew current token (auto-refreshes with broker)
   claude-peers mint-root                        Mint a new root token (broker only)
@@ -373,15 +373,72 @@ func cliSend(to, msg string) {
 	}
 }
 
+// issueTokenArgs is the parsed result of the issue-token CLI argument list.
+// Separated from cliIssueToken so the flag-handling logic can be unit-tested
+// without running the full command (which loads broker keypairs, etc.).
+type issueTokenArgs struct {
+	positional []string
+	ttl        time.Duration
+	ttlFromFlag bool
+}
+
+// parseIssueTokenArgs walks the raw arg slice, extracts --ttl / --ttl=<d>,
+// and returns the remaining positional args plus the resolved TTL. The
+// default TTL comes from the broker config (cfg.DefaultChildTTL, historically
+// 24h) so callers that never pass --ttl keep pre-T3 behaviour.
+func parseIssueTokenArgs(args []string) (*issueTokenArgs, error) {
+	out := &issueTokenArgs{
+		positional: make([]string, 0, len(args)),
+		ttl:        defaultChildTTL(),
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		var raw string
+		switch {
+		case a == "--ttl":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--ttl requires a duration (e.g. 30d, 720h)")
+			}
+			raw = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--ttl="):
+			raw = strings.TrimPrefix(a, "--ttl=")
+		default:
+			out.positional = append(out.positional, a)
+			continue
+		}
+		d, err := ParseFlexibleDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("--ttl: %w", err)
+		}
+		out.ttl = d
+		out.ttlFromFlag = true
+	}
+	return out, nil
+}
+
 func cliIssueToken(args []string) {
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: claude-peers issue-token <machine-pub-path> <role>")
+	parsed, err := parseIssueTokenArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	ttl := parsed.ttl
+	ttlSource := "default"
+	if parsed.ttlFromFlag {
+		ttlSource = "flag"
+	}
+	positional := parsed.positional
+
+	if len(positional) < 2 {
+		fmt.Fprintln(os.Stderr, "Usage: claude-peers issue-token [--ttl <duration>] <machine-pub-path> <role>")
 		fmt.Fprintln(os.Stderr, "Roles: peer-session, fleet-read, fleet-write, cli")
+		fmt.Fprintln(os.Stderr, "TTL:   24h (default), 30d, 720h, 72h30m — max 365d")
 		os.Exit(1)
 	}
 
-	pubPath := args[0]
-	role := args[1]
+	pubPath := positional[0]
+	role := positional[1]
 
 	var caps []Capability
 	switch role {
@@ -420,12 +477,17 @@ func cliIssueToken(args []string) {
 		os.Exit(1)
 	}
 
-	token, err := MintToken(kp.PrivateKey, targetPub, caps, 24*time.Hour, parentToken)
+	token, err := MintToken(kp.PrivateKey, targetPub, caps, ttl, parentToken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error minting token: %v\n", err)
 		os.Exit(1)
 	}
 
+	// Print to stdout so the caller can pipe into save-token. Print the
+	// audit line to stderr so it doesn't contaminate the JWT on stdout.
+	fmt.Fprintf(os.Stderr, "issued %s token for %s (ttl=%s, source=%s, expires=%s)\n",
+		role, filepath.Base(pubPath), ttl, ttlSource,
+		time.Now().Add(ttl).UTC().Format(time.RFC3339))
 	fmt.Println(token)
 }
 

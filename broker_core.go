@@ -766,7 +766,11 @@ func runBroker(ctx context.Context) error {
 			return
 		}
 
-		newToken, err := MintToken(kp.PrivateKey, audiencePub, claims.Capabilities, 24*time.Hour, parentToken)
+		// Use the broker-configured default TTL so a 30d-issued fleet
+		// stays 30d after refresh. Before T3 this was hardcoded to 24h,
+		// which meant every refresh dropped peers back onto the 24h
+		// rotation treadmill even if they started with a long token.
+		newToken, err := MintToken(kp.PrivateKey, audiencePub, claims.Capabilities, defaultChildTTL(), parentToken)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("mint token: %v", err), 500)
 			return

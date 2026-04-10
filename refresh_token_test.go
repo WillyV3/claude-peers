@@ -92,7 +92,10 @@ func refreshHandler(b *Broker, brokerKP KeyPair, rootToken string) http.HandlerF
 			return
 		}
 
-		newToken, err := MintToken(brokerKP.PrivateKey, audiencePub, claims.Capabilities, 24*time.Hour, rootToken)
+		// Mirror the real broker: honour cfg.DefaultChildTTL instead of
+		// hardcoding 24h. Tests that want to exercise a different TTL
+		// must set cfg.DefaultChildTTL before calling refreshHandler.
+		newToken, err := MintToken(brokerKP.PrivateKey, audiencePub, claims.Capabilities, defaultChildTTL(), rootToken)
 		if err != nil {
 			http.Error(w, "mint token: "+err.Error(), 500)
 			return
@@ -100,6 +103,51 @@ func refreshHandler(b *Broker, brokerKP KeyPair, rootToken string) http.HandlerF
 		b.validator.RegisterToken(newToken, claims.Capabilities)
 
 		writeJSON(w, map[string]string{"token": newToken})
+	}
+}
+
+// TestRefreshTokenRespectsBrokerDefaultTTL proves the T3 broker-side fix:
+// when cfg.DefaultChildTTL is set to something longer than 24h, the refresh
+// endpoint must mint children at that longer TTL instead of dropping peers
+// back onto the 24h rotation treadmill.
+func TestRefreshTokenRespectsBrokerDefaultTTL(t *testing.T) {
+	orig := cfg.DefaultChildTTL
+	defer func() { cfg.DefaultChildTTL = orig }()
+	cfg.DefaultChildTTL = "30d"
+
+	b, brokerKP, _, delegated := setupRefreshBroker(t)
+
+	rootToken, err := MintRootToken(brokerKP.PrivateKey, AllCapabilities(), 365*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.validator.RegisterToken(rootToken, AllCapabilities())
+
+	handler := refreshHandler(b, brokerKP, rootToken)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/refresh-token", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Authorization", "Bearer "+delegated)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	claims, err := b.validator.Validate(resp["token"])
+	if err != nil {
+		t.Fatalf("validate refreshed token: %v", err)
+	}
+	if claims.ExpiresAt == nil {
+		t.Fatal("refreshed token missing exp")
+	}
+	remaining := time.Until(claims.ExpiresAt.Time)
+	if remaining < 29*24*time.Hour || remaining > 31*24*time.Hour {
+		t.Fatalf("expected ~30d TTL, got %s", remaining.Round(time.Minute))
 	}
 }
 
