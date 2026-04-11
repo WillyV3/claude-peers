@@ -8,3 +8,7 @@ sontara-lattice
 *.db-wal
 *.db-shm
 *.log
+
+# Per-developer agent-name override -- never commit, every cloner would
+# auto-register under this name via resolveAgentName walk-up (T4+).
+.claude-peers-agent
