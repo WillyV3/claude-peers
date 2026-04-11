@@ -341,6 +341,33 @@ func syncFleetMemory() {
 	logMCP("Fleet memory synced to %s (%d bytes)", path, len(data))
 }
 
+// writePeerRow renders one peer entry into the list_peers MCP tool result
+// using the historical layout. When isSelf is true, the header line gets
+// a "← this session" suffix so the caller can spot itself at a glance.
+func writePeerRow(sb *strings.Builder, p Peer, isSelf bool) {
+	if p.AgentName != "" {
+		fmt.Fprintf(sb, "%s (agent) on %s [session %s]", p.AgentName, p.Machine, p.ID)
+	} else {
+		fmt.Fprintf(sb, "session %s on %s (ephemeral -- not addressable by name)", p.ID, p.Machine)
+	}
+	if isSelf {
+		sb.WriteString("  ← this session")
+	}
+	sb.WriteString("\n")
+	if p.Project != "" {
+		fmt.Fprintf(sb, "  Project: %s", p.Project)
+		if p.Branch != "" {
+			fmt.Fprintf(sb, " [%s]", p.Branch)
+		}
+		fmt.Fprintln(sb)
+	}
+	fmt.Fprintf(sb, "  CWD: %s\n", p.CWD)
+	if p.Summary != "" {
+		fmt.Fprintf(sb, "  Summary: %s\n", p.Summary)
+	}
+	fmt.Fprintf(sb, "  Last seen: %s\n\n", p.LastSeen)
+}
+
 func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *MCPTransport) {
 	var call struct {
 		Name      string          `json:"name"`
@@ -355,11 +382,20 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 		}
 		json.Unmarshal(call.Arguments, &args)
 
+		// No ExcludeID -- list_peers should return ALL peers including this
+		// session. Pre-T5 the MCP tool hardcoded ExcludeID=myID, which made
+		// the caller invisible to itself and broke "am I registered?" /
+		// "what's my session id?" introspection. The caller's row is now
+		// printed first with a "← this session" marker so Claude can
+		// answer those questions at a glance. All other consumers of
+		// /list-peers (CLI peers/status/send, internal send_message lookup)
+		// already pass empty ExcludeID, so this aligns the MCP tool with
+		// the rest of the codebase. The broker primitive still supports
+		// ExcludeID for callers that genuinely want "everyone but me".
 		listReq := ListPeersRequest{
-			Scope:     args.Scope,
-			CWD:       cwd,
-			GitRoot:   root,
-			ExcludeID: myID,
+			Scope:   args.Scope,
+			CWD:     cwd,
+			GitRoot: root,
 		}
 		if args.Scope == "machine" {
 			listReq.Machine = cfg.MachineName
@@ -373,31 +409,56 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 		}
 
 		if len(peers) == 0 {
-			toolResult(id, t, "No other Claude Code instances found (scope: %s).", args.Scope)
+			toolResult(id, t, "No peers registered (scope: %s). The broker has no sessions at all.", args.Scope)
+			return
+		}
+
+		// Locate this session in the result so we can print it first and
+		// detect the "registered but missing" diagnostic case.
+		selfIndex := -1
+		for i, p := range peers {
+			if p.ID == myID {
+				selfIndex = i
+				break
+			}
+		}
+
+		// Edge case: only this session is registered, no others on the network.
+		if len(peers) == 1 && selfIndex == 0 {
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "Only this session is registered (scope: %s, no other peers).\n\n", args.Scope)
+			writePeerRow(&sb, peers[0], true)
+			toolResult(id, t, "%s", sb.String())
 			return
 		}
 
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "Found %d peer(s) (scope: %s):\n\n", len(peers), args.Scope)
-		for _, p := range peers {
-			if p.AgentName != "" {
-				fmt.Fprintf(&sb, "%s (agent) on %s [session %s]\n", p.AgentName, p.Machine, p.ID)
-			} else {
-				fmt.Fprintf(&sb, "session %s on %s (ephemeral -- not addressable by name)\n", p.ID, p.Machine)
-			}
-			if p.Project != "" {
-				fmt.Fprintf(&sb, "  Project: %s", p.Project)
-				if p.Branch != "" {
-					fmt.Fprintf(&sb, " [%s]", p.Branch)
-				}
-				fmt.Fprintln(&sb)
-			}
-			fmt.Fprintf(&sb, "  CWD: %s\n", p.CWD)
-			if p.Summary != "" {
-				fmt.Fprintf(&sb, "  Summary: %s\n", p.Summary)
-			}
-			fmt.Fprintf(&sb, "  Last seen: %s\n\n", p.LastSeen)
+
+		// Print this session first if present, so Claude sees its own
+		// identity at the top of the list and can immediately answer
+		// "am I registered, and as what?".
+		if selfIndex >= 0 {
+			writePeerRow(&sb, peers[selfIndex], true)
 		}
+		for i, p := range peers {
+			if i == selfIndex {
+				continue
+			}
+			writePeerRow(&sb, p, false)
+		}
+
+		// Diagnostic: if the caller is not in the registry, surface it
+		// loudly. This should be impossible under normal operation -- the
+		// MCP server registers on startup -- so its presence is a real
+		// signal that something is broken in the registration path.
+		if selfIndex < 0 {
+			fmt.Fprintf(&sb, "WARNING: this session [%s] is not in the peer registry. "+
+				"Registration may have failed; messages addressed to this session "+
+				"will not deliver. Try restarting the claude-peers MCP server.\n",
+				myID)
+		}
+
 		toolResult(id, t, "%s", sb.String())
 
 	case "send_message":
