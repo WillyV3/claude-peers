@@ -195,8 +195,23 @@ func cliFetchOnce(path string, body any, result any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%d: %s", resp.StatusCode, string(b))
+		body, _ := io.ReadAll(resp.Body)
+		// T7: a 409 carries a structured conflict response. Both /register
+		// and /claim-agent return 409 + a JSON body shaped identically to
+		// the success response (ok:false, error, held_by_session,
+		// held_by_machine, held_by_cwd, held_by_since). Pre-T7, cliFetchOnce
+		// surfaced this as an opaque error string, which meant T6's
+		// ephemeral-fallback in fleet_server.go never executed (its guard
+		// `if !reg.OK && agentName != ""` sits after the error-bail at
+		// register's caller, so reg was never populated). Decoding the body
+		// into the caller's result lets them inspect ok:false and branch
+		// on the conflict fields. All other non-200 codes remain hard errors.
+		if resp.StatusCode == http.StatusConflict && result != nil {
+			if decErr := json.Unmarshal(body, result); decErr == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("%d: %s", resp.StatusCode, string(body))
 	}
 	if result != nil {
 		return json.NewDecoder(resp.Body).Decode(result)
