@@ -93,6 +93,8 @@ func main() {
 		cliKillBroker()
 	case "reauth-fleet":
 		cliReauthFleet()
+	case "run":
+		runClaudeWrapped(os.Args[2:])
 	default:
 		printUsage()
 		os.Exit(1)
@@ -131,6 +133,10 @@ Usage:
   claude-peers config                           Show current config
   claude-peers broker                           Start the broker daemon
   claude-peers server                           Start MCP stdio server (used by Claude Code)
+  claude-peers run [claude-args...]             Launch claude with the claude-peers dev channel
+                                                loaded (exec-replaces this process). Strips --as
+                                                into CLAUDE_PEERS_AGENT for the child. Skips the
+                                                channel flag on -p / --print (daemon-call friendly).
   claude-peers status                           Show broker status and all peers
   claude-peers peers                            List all peers
   claude-peers send <id> <msg>                  Send a message to a peer
