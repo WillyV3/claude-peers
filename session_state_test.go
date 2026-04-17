@@ -107,6 +107,64 @@ func TestWriteSessionStateFile_EphemeralFallback(t *testing.T) {
 	}
 }
 
+func TestUpdateSessionStateAgentName_ClearsEphemeralFallback(t *testing.T) {
+	// Scenario: session started ephemeral after T6 collision, then the
+	// holder of the configured name exited, so on a later claim_agent_name
+	// the name is free. State file must reflect the new name AND clear
+	// ephemeral_fallback so the hook stops warning.
+	tmp := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", tmp)
+
+	initial := SessionState{
+		SessionID:           "s1",
+		AgentName:           "",
+		ConfiguredAgentName: "gridwatch",
+		EphemeralFallback:   true,
+		ParentPID:           100,
+		RegisteredAt:        "t1",
+	}
+	path := writeSessionStateFile(100, initial)
+	if path == "" {
+		t.Fatal("setup: write failed")
+	}
+
+	updateSessionStateAgentName(path, "gridwatch")
+
+	data, _ := os.ReadFile(path)
+	var got SessionState
+	json.Unmarshal(data, &got)
+	if got.AgentName != "gridwatch" {
+		t.Errorf("AgentName: got %q, want gridwatch", got.AgentName)
+	}
+	if got.EphemeralFallback {
+		t.Error("EphemeralFallback should be cleared after successful mid-flight claim")
+	}
+	if got.ConfiguredAgentName != "gridwatch" {
+		t.Errorf("ConfiguredAgentName should persist: got %q", got.ConfiguredAgentName)
+	}
+	if got.SessionID != "s1" {
+		t.Errorf("SessionID should persist: got %q", got.SessionID)
+	}
+}
+
+func TestUpdateSessionStateAgentName_MissingPathIsNoOp(t *testing.T) {
+	// Best-effort: updater with no path (writeSessionStateFile failed
+	// earlier) must not panic or error, just skip.
+	updateSessionStateAgentName("", "whatever")
+}
+
+func TestUpdateSessionStateAgentName_MalformedFileIsNoOp(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "garbage.json")
+	os.WriteFile(path, []byte("not json"), 0o644)
+	// Should log + return without touching the file.
+	updateSessionStateAgentName(path, "ignored")
+	data, _ := os.ReadFile(path)
+	if string(data) != "not json" {
+		t.Fatalf("malformed file was rewritten: %q", string(data))
+	}
+}
+
 func TestWriteSessionStateFile_OverwritesExisting(t *testing.T) {
 	// A restarted MCP server with the same parent PID should atomically
 	// replace the prior state (claude-code keeps its PID across a session

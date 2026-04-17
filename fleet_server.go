@@ -112,6 +112,53 @@ func writeSessionStateFile(ppid int, state SessionState) string {
 	return path
 }
 
+// updateSessionStateAgentName refreshes the session state file after a
+// successful mid-session claim_agent_name call. Reads the current file,
+// overwrites the AgentName (and clears EphemeralFallback, since the session
+// just proved the name is claimable), writes back atomically. Best-effort:
+// a missing or malformed file is logged and skipped -- the MCP server keeps
+// running; the state file is a diagnostic affordance, not load-bearing.
+//
+// Rationale: without this, a session that starts ephemeral and then claims
+// a name mid-flight would leave current-<ppid>.json stale. jim's healthcheck
+// hook at SessionStart reads that file to decide whether to warn the user
+// about T6 ephemeral fallback -- on a re-open or reconnect after a
+// mid-flight claim, the hook would falsely warn "running ephemeral" against
+// a session that's actually correctly named.
+func updateSessionStateAgentName(path, newName string) {
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		logMCP("Session state: read %s: %v (skipping update)", path, err)
+		return
+	}
+	var state SessionState
+	if err := json.Unmarshal(data, &state); err != nil {
+		logMCP("Session state: unmarshal %s: %v (skipping update)", path, err)
+		return
+	}
+	state.AgentName = newName
+	// A successful claim means the name was not held by anyone else; clear
+	// the ephemeral-fallback flag so the hook stops warning about it.
+	state.EphemeralFallback = false
+	out, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		logMCP("Session state: marshal: %v", err)
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		logMCP("Session state: write %s: %v", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		logMCP("Session state: rename %s -> %s: %v", tmp, path, err)
+		os.Remove(tmp)
+	}
+}
+
 func isBrokerAlive() bool {
 	client := http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(cfg.BrokerURL + "/health") // /health is always public
@@ -435,7 +482,7 @@ func runServer(ctx context.Context) error {
 		case "tools/list":
 			handleToolsList(req.ID, t)
 		case "tools/call":
-			handleToolCall(req.ID, req.Params, myID, cwd, root, t)
+			handleToolCall(req.ID, req.Params, myID, cwd, root, sessionStatePath, t)
 		default:
 			if req.ID != nil {
 				t.respondError(req.ID, -32601, fmt.Sprintf("Method not found: %s", req.Method))
@@ -500,7 +547,7 @@ func writePeerRow(sb *strings.Builder, p Peer, isSelf bool) {
 	fmt.Fprintf(sb, "  Last seen: %s\n\n", p.LastSeen)
 }
 
-func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *MCPTransport) {
+func handleToolCall(id any, params json.RawMessage, myID, cwd, root, sessionStatePath string, t *MCPTransport) {
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -681,6 +728,10 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root string, t *M
 			}
 			return
 		}
+		// Keep the session state file in sync with the new agent name so a
+		// SessionStart hook reading current-<ppid>.json doesn't misfire a
+		// "running ephemeral" warning against a session that claimed mid-flight.
+		updateSessionStateAgentName(sessionStatePath, args.Name)
 		toolResult(id, t, "Claimed agent name: %s. Other sessions can now address this session as %q across restarts (as long as this session holds the name).", args.Name, args.Name)
 
 	case "check_messages":
