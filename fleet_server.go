@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,6 +41,30 @@ func loadAuthToken() string {
 // brokerFetch delegates to cliFetch -- one implementation for all broker HTTP calls.
 func brokerFetch(path string, body any, result any) error {
 	return cliFetch(path, body, result)
+}
+
+// sessionRef holds the broker-assigned session ID for this MCP server.
+// The ID is mutable because a broker restart or stale-sweep can silently
+// evict our peer row while the MCP process keeps running: heartbeat (T10)
+// detects that by inspecting HeartbeatResponse.Reason, calls /register again
+// to rebind, and Set()s the new ID here. Other goroutines (poll loop,
+// summary refresh, unregister defer, per-tool handlers) Get() the current
+// value at the point of each broker call, so they always use the latest
+// binding without needing their own lock. Zero value is usable but useless
+// (Get returns ""). Callers must Set before any Get that expects a real ID.
+type sessionRef struct {
+	id atomic.Pointer[string]
+}
+
+func (s *sessionRef) Get() string {
+	if p := s.id.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+func (s *sessionRef) Set(v string) {
+	s.id.Store(&v)
 }
 
 // SessionState is the shape of ~/.cache/claude-peers/current-<ppid>.json.
@@ -371,11 +396,12 @@ func runServer(ctx context.Context) error {
 	if !reg.OK {
 		return fmt.Errorf("register failed: %s", reg.Error)
 	}
-	myID := reg.ID
+	session := &sessionRef{}
+	session.Set(reg.ID)
 	if agentName != "" {
-		logMCP("Registered as %s (session %s)", agentName, myID)
+		logMCP("Registered as %s (session %s)", agentName, reg.ID)
 	} else {
-		logMCP("Registered as <ephemeral> (session %s)", myID)
+		logMCP("Registered as <ephemeral> (session %s)", reg.ID)
 	}
 
 	// T8: write a session state file keyed by the parent PID (claude-code
@@ -384,8 +410,21 @@ func runServer(ctx context.Context) error {
 	// hitting the broker, and warn the user when T6 ephemeral-fallback fired
 	// (configured_agent_name != agent_name).
 	ppid := os.Getppid()
+	writeState := func(id, name string, fallback bool) {
+		writeSessionStateFile(ppid, SessionState{
+			SessionID:           id,
+			AgentName:           name,
+			ConfiguredAgentName: configuredAgentName,
+			EphemeralFallback:   fallback,
+			CWD:                 cwd,
+			Machine:             cfg.MachineName,
+			PID:                 os.Getpid(),
+			ParentPID:           ppid,
+			RegisteredAt:        nowISO(),
+		})
+	}
 	sessionStatePath := writeSessionStateFile(ppid, SessionState{
-		SessionID:           myID,
+		SessionID:           reg.ID,
 		AgentName:           agentName,
 		ConfiguredAgentName: configuredAgentName,
 		EphemeralFallback:   configuredAgentName != "" && agentName == "",
@@ -399,6 +438,50 @@ func runServer(ctx context.Context) error {
 		logMCP("Session state: %s", sessionStatePath)
 	}
 
+	// T10: rebind after silent eviction. When the broker stale-sweeps our
+	// peer row (broker restart, connectivity gap long enough to cross the
+	// stale_timeout, or explicit admin unregister), subsequent heartbeats
+	// UPDATE zero rows. Pre-T10 this was invisible; post-T10 the broker
+	// returns HeartbeatResponse{OK:false, Reason:"unknown_session"}, the
+	// heartbeat loop detects it, and we re-register transparently -- same
+	// code path as initial registration, including T6 collision fallback.
+	// A new session_id is published atomically so the poll and summary
+	// goroutines pick it up on their next iteration without a restart.
+	rebindToBroker := func() error {
+		retryReq := registerReq
+		retryReq.AgentName = configuredAgentName
+		retryReq.PID = os.Getpid()
+		retryReq.Summary = "" // let the summary refresher replace it shortly
+		var newReg RegisterResponse
+		if err := brokerFetch("/register", retryReq, &newReg); err != nil {
+			return fmt.Errorf("re-register: %w", err)
+		}
+		if !newReg.OK && configuredAgentName != "" {
+			logMCP("WARNING: on re-register, configured agent name %q is again held (now by %s on %s); falling back to ephemeral.",
+				configuredAgentName, newReg.HeldBySession, newReg.HeldByMachine)
+			retryReq.AgentName = ""
+			if err := brokerFetch("/register", retryReq, &newReg); err != nil {
+				return fmt.Errorf("re-register ephemeral: %w", err)
+			}
+		}
+		if !newReg.OK {
+			return fmt.Errorf("re-register failed: %s", newReg.Error)
+		}
+		session.Set(newReg.ID)
+		newName := retryReq.AgentName
+		fallback := configuredAgentName != "" && newName == ""
+		writeState(newReg.ID, newName, fallback)
+		switch {
+		case fallback:
+			logMCP("Re-registered as <ephemeral> (session %s, configured name %q was held)", newReg.ID, configuredAgentName)
+		case newName != "":
+			logMCP("Re-registered as %s (session %s)", newName, newReg.ID)
+		default:
+			logMCP("Re-registered as <ephemeral> (session %s)", newReg.ID)
+		}
+		return nil
+	}
+
 	// Fetch fleet memory from broker and write locally.
 	go syncFleetMemory()
 
@@ -406,7 +489,7 @@ func runServer(ctx context.Context) error {
 	if initialSummary == "" {
 		go func() {
 			if s := <-summaryCh; s != "" {
-				brokerFetch("/set-summary", SetSummaryRequest{ID: myID, Summary: s}, nil)
+				brokerFetch("/set-summary", SetSummaryRequest{ID: session.Get(), Summary: s}, nil)
 				logMCP("Summary: %s", s)
 			}
 		}()
@@ -419,7 +502,7 @@ func runServer(ctx context.Context) error {
 			newBranch := gitBranch(cwd)
 			newFiles := recentFiles(cwd, 10)
 			if s := generateSummary(cwd, root, newBranch, newFiles); s != "" {
-				brokerFetch("/set-summary", SetSummaryRequest{ID: myID, Summary: s}, nil)
+				brokerFetch("/set-summary", SetSummaryRequest{ID: session.Get(), Summary: s}, nil)
 			}
 		}
 	}()
@@ -427,7 +510,7 @@ func runServer(ctx context.Context) error {
 	t := newMCPTransport()
 
 	defer func() {
-		brokerFetch("/unregister", UnregisterRequest{ID: myID}, nil)
+		brokerFetch("/unregister", UnregisterRequest{ID: session.Get()}, nil)
 		logMCP("Unregistered from broker")
 		if sessionStatePath != "" {
 			os.Remove(sessionStatePath)
@@ -446,7 +529,7 @@ func runServer(ctx context.Context) error {
 			case <-pollCtx.Done():
 				return
 			case <-ticker.C:
-				pollAndPush(myID, cwd, root, t)
+				pollAndPush(session.Get(), cwd, root, t)
 			}
 		}
 	})
@@ -459,7 +542,18 @@ func runServer(ctx context.Context) error {
 			case <-pollCtx.Done():
 				return
 			case <-ticker.C:
-				brokerFetch("/heartbeat", HeartbeatRequest{ID: myID}, nil)
+				var resp HeartbeatResponse
+				if err := brokerFetch("/heartbeat", HeartbeatRequest{ID: session.Get()}, &resp); err != nil {
+					// Network blip or broker-down: ignore and retry next tick.
+					// We don't re-register on transport errors because the next
+					// successful heartbeat will report the real state of our row.
+					continue
+				}
+				if !resp.OK && resp.Reason == HeartbeatReasonUnknownSession {
+					if err := rebindToBroker(); err != nil {
+						logMCP("Re-register after eviction failed: %v (will retry next heartbeat)", err)
+					}
+				}
 			}
 		}
 	})
@@ -482,7 +576,7 @@ func runServer(ctx context.Context) error {
 		case "tools/list":
 			handleToolsList(req.ID, t)
 		case "tools/call":
-			handleToolCall(req.ID, req.Params, myID, cwd, root, sessionStatePath, t)
+			handleToolCall(req.ID, req.Params, session.Get(), cwd, root, sessionStatePath, t)
 		default:
 			if req.ID != nil {
 				t.respondError(req.ID, -32601, fmt.Sprintf("Method not found: %s", req.Method))

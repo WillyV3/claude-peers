@@ -339,8 +339,27 @@ func (b *Broker) register(req RegisterRequest) RegisterResponse {
 	return RegisterResponse{OK: true, ID: id}
 }
 
-func (b *Broker) heartbeat(req HeartbeatRequest) {
-	b.db.Exec("UPDATE peers SET last_seen = ? WHERE id = ?", nowISO(), req.ID)
+// heartbeat updates last_seen for the peer identified by req.ID and reports
+// whether the row exists. Pre-T10 this returned nothing; the UPDATE silently
+// no-ops if the row was stale-swept, which is why clients went zombie after
+// broker restarts. Returning the affected-row count lets the client detect
+// its own eviction and re-register transparently.
+func (b *Broker) heartbeat(req HeartbeatRequest) HeartbeatResponse {
+	result, err := b.db.Exec("UPDATE peers SET last_seen = ? WHERE id = ?", nowISO(), req.ID)
+	if err != nil {
+		return HeartbeatResponse{OK: false, Reason: "db_error"}
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		// RowsAffected is cheap and shouldn't fail on modernc/sqlite, but if
+		// the driver ever reports unsupported we prefer the safe answer
+		// (OK=true) rather than triggering spurious re-registers.
+		return HeartbeatResponse{OK: true}
+	}
+	if n == 0 {
+		return HeartbeatResponse{OK: false, Reason: HeartbeatReasonUnknownSession}
+	}
+	return HeartbeatResponse{OK: true}
 }
 
 func (b *Broker) setSummary(req SetSummaryRequest) {
@@ -841,8 +860,7 @@ func runBroker(ctx context.Context) error {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		b.heartbeat(req)
-		writeJSON(w, map[string]bool{"ok": true})
+		writeJSON(w, b.heartbeat(req))
 	}))
 
 	mux.HandleFunc("POST /set-summary", requireCapability("peer/set-summary", func(w http.ResponseWriter, r *http.Request) {

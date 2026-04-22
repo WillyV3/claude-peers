@@ -71,6 +71,25 @@ type HeartbeatRequest struct {
 	ID string `json:"id"`
 }
 
+// HeartbeatResponse tells the client whether its session is still known to
+// the broker. Pre-T10 the /heartbeat endpoint returned only {"ok":true} as a
+// fixed envelope: the UPDATE behind heartbeat no-ops silently on missing
+// rows, so a client whose peer row had been stale-swept (broker restart,
+// explicit unregister, or sweep after a network partition) kept heartbeating
+// forever into the void. T10 surfaces the eviction: when RowsAffected == 0
+// the broker returns {"ok":false,"reason":"unknown_session"} and the client
+// transparently re-registers. Old clients that decode into a nil result
+// still see HTTP 200 and ignore the body -- forward-compatible wire change.
+type HeartbeatResponse struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// HeartbeatReasonUnknownSession signals the caller that its session_id no
+// longer matches any peer row. The broker sets this when Reason is returned
+// from /heartbeat or /set-summary. Callers detect it to trigger re-register.
+const HeartbeatReasonUnknownSession = "unknown_session"
+
 type SetSummaryRequest struct {
 	ID      string `json:"id"`
 	Summary string `json:"summary"`
