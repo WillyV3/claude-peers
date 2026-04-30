@@ -167,9 +167,29 @@ func newBroker() (*Broker, error) {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		)`,
+		// agent_names_seen: append-only history of every agent name that has
+		// ever been registered or claimed on this broker. Lets sendMessage
+		// distinguish "agent is offline" from "name was never held by anyone"
+		// (typo detection). Rows never expire -- typo detection is more
+		// valuable than table size, and one row per distinct agent name is
+		// trivially small.
+		`CREATE TABLE IF NOT EXISTS agent_names_seen (
+			name TEXT PRIMARY KEY,
+			first_seen TEXT NOT NULL
+		)`,
 	} {
 		db.Exec(stmt)
 	}
+
+	// One-shot backfill so brokers upgraded mid-flight don't show every
+	// previously-claimed name as "never seen". Pulls from currently-live
+	// peers and from the message history (any to_agent ever sent). INSERT
+	// OR IGNORE keeps existing rows intact across restarts.
+	db.Exec(`INSERT OR IGNORE INTO agent_names_seen (name, first_seen)
+		SELECT agent_name, started_at FROM peers WHERE agent_name != ''`)
+	db.Exec(`INSERT OR IGNORE INTO agent_names_seen (name, first_seen)
+		SELECT to_agent, MIN(sent_at) FROM messages
+		WHERE to_agent != '' GROUP BY to_agent`)
 
 	b := &Broker{db: db, nats: newNATSPublisher()}
 
@@ -329,6 +349,10 @@ func (b *Broker) register(req RegisterRequest) RegisterResponse {
 			`UPDATE messages SET to_session = ? WHERE to_agent = ? AND to_session = '' AND delivered_at IS NULL`,
 			id, req.AgentName,
 		)
+		b.db.Exec(
+			`INSERT OR IGNORE INTO agent_names_seen (name, first_seen) VALUES (?, ?)`,
+			req.AgentName, now,
+		)
 	}
 
 	b.emitEvent("peer_joined", id, req.Machine, req.Summary)
@@ -438,6 +462,7 @@ func (b *Broker) sendMessage(req SendMessageRequest) SendMessageResponse {
 
 	var toSession, toAgent string
 	var queued bool
+	var status DeliveryStatus
 
 	if req.ToSession != "" {
 		// Direct session targeting. Session must exist -- no queueing for ephemeral peers.
@@ -447,6 +472,7 @@ func (b *Broker) sendMessage(req SendMessageRequest) SendMessageResponse {
 			return SendMessageResponse{OK: false, Error: fmt.Sprintf("session %s not found", req.ToSession)}
 		}
 		toSession = req.ToSession
+		status = DeliveryStatusBound
 	} else {
 		// Agent targeting. Find the session currently holding the name, if any.
 		toAgent = req.ToAgent
@@ -454,8 +480,20 @@ func (b *Broker) sendMessage(req SendMessageRequest) SendMessageResponse {
 		err := b.db.QueryRow("SELECT id FROM peers WHERE agent_name = ? LIMIT 1", req.ToAgent).Scan(&holder)
 		if err == nil && holder != "" {
 			toSession = holder
+			status = DeliveryStatusBound
 		} else {
 			queued = true // no live holder -- message sits on the agent queue
+			// Distinguish offline-known from never-claimed for typo detection.
+			var seen bool
+			b.db.QueryRow(
+				"SELECT EXISTS(SELECT 1 FROM agent_names_seen WHERE name = ?)",
+				req.ToAgent,
+			).Scan(&seen)
+			if seen {
+				status = DeliveryStatusQueuedOffline
+			} else {
+				status = DeliveryStatusQueuedUnknown
+			}
 		}
 	}
 
@@ -483,7 +521,12 @@ func (b *Broker) sendMessage(req SendMessageRequest) SendMessageResponse {
 	b.nats.publish("fleet.message", FleetEvent{
 		Type: "message_sent", PeerID: req.FromID, Data: target,
 	})
-	return SendMessageResponse{OK: true, MessageID: int(msgID), Queued: queued}
+	return SendMessageResponse{
+		OK:             true,
+		MessageID:      int(msgID),
+		Queued:         queued,
+		DeliveryStatus: status,
+	}
 }
 
 // pollMessages returns undelivered messages addressed to the session directly
@@ -613,6 +656,12 @@ func (b *Broker) claimAgent(req ClaimAgentRequest) ClaimAgentResponse {
 	b.db.Exec(
 		`UPDATE messages SET to_session = ? WHERE to_agent = ? AND to_session = '' AND delivered_at IS NULL`,
 		req.SessionID, req.AgentName,
+	)
+
+	// Record this name in the history (typo detection on send_message).
+	b.db.Exec(
+		`INSERT OR IGNORE INTO agent_names_seen (name, first_seen) VALUES (?, ?)`,
+		req.AgentName, nowISO(),
 	)
 
 	b.emitEvent("agent_claimed", req.SessionID, "", req.AgentName)

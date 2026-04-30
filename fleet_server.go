@@ -776,10 +776,25 @@ func handleToolCall(id any, params json.RawMessage, myID, cwd, root, sessionStat
 			toolError(id, t, "Failed to send: %s", resp.Error)
 			return
 		}
-		if resp.Queued {
-			toolResult(id, t, "Message queued for agent %q (no live session holds it right now -- will deliver on reconnect).", args.To)
-		} else {
-			toolResult(id, t, "Message sent to %s", args.To)
+		// Three-way branch when the broker reports DeliveryStatus (post-T11).
+		// Old brokers omit the field, in which case we fall back to the
+		// pre-T11 two-state output driven by Queued alone -- no typo warning,
+		// since an old broker can't distinguish offline-known from
+		// never-claimed.
+		switch resp.DeliveryStatus {
+		case DeliveryStatusBound:
+			toolResult(id, t, "Message sent to %s (recipient is online, message is bound for delivery).", args.To)
+		case DeliveryStatusQueuedOffline:
+			toolResult(id, t, "Agent %q is offline. Message queued -- will deliver when that agent reconnects.", args.To)
+		case DeliveryStatusQueuedUnknown:
+			toolResult(id, t, "WARNING: no session has ever claimed agent name %q on this broker. Message is queued but may sit indefinitely if the name is wrong. Run list_peers to verify the recipient's agent name.", args.To)
+		default:
+			// Old broker. Use the legacy bool to choose between two outputs.
+			if resp.Queued {
+				toolResult(id, t, "Message queued for agent %q (no live session holds it right now -- will deliver on reconnect).", args.To)
+			} else {
+				toolResult(id, t, "Message sent to %s", args.To)
+			}
 		}
 
 	case "set_summary":

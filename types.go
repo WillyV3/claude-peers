@@ -114,11 +114,36 @@ type SendMessageRequest struct {
 	Text      string `json:"text"`
 }
 
+// DeliveryStatus is the broker's verdict on a sent message. Set by post-T11
+// brokers to give callers a precise three-way signal; older brokers omit it
+// and callers must fall back to the Queued bool. Empty means "broker did
+// not report status -- treat as ambiguous and decide based on Queued".
+type DeliveryStatus string
+
+const (
+	// DeliveryStatusBound: a live session is currently holding the recipient
+	// (agent or session ID). The message is bound to that session, push
+	// delivery + ACK still pending but the recipient is online.
+	DeliveryStatusBound DeliveryStatus = "bound"
+	// DeliveryStatusQueuedOffline: the recipient agent name has been claimed
+	// before but no session currently holds it. Will deliver on reconnect.
+	DeliveryStatusQueuedOffline DeliveryStatus = "queued_offline"
+	// DeliveryStatusQueuedUnknown: no session has ever claimed this agent
+	// name on this broker. Likely a typo -- the message will queue but may
+	// sit indefinitely.
+	DeliveryStatusQueuedUnknown DeliveryStatus = "queued_unknown"
+)
+
 type SendMessageResponse struct {
 	OK        bool   `json:"ok"`
 	MessageID int    `json:"message_id,omitempty"`
 	Queued    bool   `json:"queued,omitempty"` // true if delivered to queue (recipient offline)
-	Error     string `json:"error,omitempty"`
+	// DeliveryStatus refines Queued with one of three named values. Old
+	// brokers omit this field; new clients reading an old broker should fall
+	// back to Queued alone (no typo warning, since the broker can't
+	// distinguish offline-known from never-claimed).
+	DeliveryStatus DeliveryStatus `json:"delivery_status,omitempty"`
+	Error          string         `json:"error,omitempty"`
 }
 
 // PollMessagesRequest fetches undelivered messages for a session. If the session
