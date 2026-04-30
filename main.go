@@ -387,10 +387,20 @@ func cliSend(to, msg string) {
 		fmt.Fprintf(os.Stderr, "Failed: %s\n", resp.Error)
 		os.Exit(1)
 	}
-	if resp.Queued {
-		fmt.Printf("Message queued for agent %q (no live session holds it right now -- will deliver on reconnect).\n", to)
-	} else {
-		fmt.Printf("Message sent to %s\n", to)
+	switch resp.DeliveryStatus {
+	case DeliveryStatusBound:
+		fmt.Printf("Message sent to %s (recipient is online).\n", to)
+	case DeliveryStatusQueuedOffline:
+		fmt.Printf("Agent %q is offline. Message queued -- will deliver when that agent reconnects.\n", to)
+	case DeliveryStatusQueuedUnknown:
+		fmt.Printf("WARNING: no session has ever claimed agent name %q on this broker. Message queued but may sit indefinitely if the name is wrong. Run `claude-peers peers` to verify.\n", to)
+	default:
+		// Old broker (no DeliveryStatus) -- fall back to two-state output.
+		if resp.Queued {
+			fmt.Printf("Message queued for agent %q (no live session holds it right now -- will deliver on reconnect).\n", to)
+		} else {
+			fmt.Printf("Message sent to %s\n", to)
+		}
 	}
 }
 
