@@ -24,9 +24,30 @@ type UCANClaims struct {
 
 type capabilitySet map[string]bool
 
+// TokenPersister is the optional side-channel a TokenValidator uses to make
+// learned tokens survive process restarts. nil persister means in-memory
+// only (correct for tests and ephemeral brokers). The validator calls Save
+// from inside the lock; implementations should be quick and non-blocking
+// (defer expensive work, or accept the latency).
+//
+// The pattern: every time the validator authenticates a token (root register
+// at startup, delegated chain validate at request time) it also calls Save
+// so the broker can rebuild knownTokens after a restart instead of waiting
+// for every chain to re-authenticate.
+type TokenPersister interface {
+	Save(hash string, capabilities []string, expiresAt time.Time)
+}
+
+// PersistedToken is one row of restored state passed to TokenValidator.Restore.
+type PersistedToken struct {
+	Hash         string
+	Capabilities []string
+}
+
 type TokenValidator struct {
 	rootPubKey  ed25519.PublicKey
 	knownTokens map[string]capabilitySet
+	persister   TokenPersister
 	mu          sync.RWMutex
 }
 
@@ -123,6 +144,66 @@ func NewTokenValidator(rootPubKey ed25519.PublicKey) *TokenValidator {
 	}
 }
 
+// WithPersister attaches a TokenPersister so future Save calls go through.
+// Returns the validator for chaining. Pass nil to detach (tests use this).
+func (v *TokenValidator) WithPersister(p TokenPersister) *TokenValidator {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.persister = p
+	return v
+}
+
+// Restore seeds the in-memory knownTokens map from rows the broker loaded
+// out of SQLite at startup. Call BEFORE attaching a persister, so the
+// restore path doesn't write the same rows back. Skips entries with empty
+// hash; capabilities are taken verbatim. Idempotent across multiple calls.
+func (v *TokenValidator) Restore(rows []PersistedToken) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, r := range rows {
+		if r.Hash == "" {
+			continue
+		}
+		cs := make(capabilitySet, len(r.Capabilities))
+		for _, c := range r.Capabilities {
+			cs[c] = true
+		}
+		v.knownTokens[r.Hash] = cs
+	}
+}
+
+// extractTokenExpiry parses tokenStr without verification and returns its
+// ExpiresAt. Used internally to know how long to persist a token. Falls
+// back to 24h from now if the token has no exp claim, so persistence still
+// works for malformed-but-trusted tokens (we already chose to register them
+// in-memory; persisting them is strictly additive).
+func extractTokenExpiry(tokenStr string) time.Time {
+	parser := jwt.NewParser(jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithoutClaimsValidation())
+	claims := &UCANClaims{}
+	if _, _, err := parser.ParseUnverified(tokenStr, claims); err != nil {
+		return time.Now().Add(24 * time.Hour)
+	}
+	if claims.ExpiresAt == nil {
+		return time.Now().Add(24 * time.Hour)
+	}
+	return claims.ExpiresAt.Time
+}
+
+// persistKnown is the common write path: snapshot caps, hash, send to
+// persister if non-nil. Caller must hold v.mu (read or write -- we don't
+// re-lock). Resilient to a nil persister so in-memory-only mode is the
+// zero value.
+func (v *TokenValidator) persistKnown(hash, tokenStr string, caps capabilitySet) {
+	if v.persister == nil {
+		return
+	}
+	resources := make([]string, 0, len(caps))
+	for r := range caps {
+		resources = append(resources, r)
+	}
+	v.persister.Save(hash, resources, extractTokenExpiry(tokenStr))
+}
+
 func (v *TokenValidator) Validate(tokenStr string) (*UCANClaims, error) {
 	return v.validate(tokenStr, false)
 }
@@ -191,6 +272,7 @@ func (v *TokenValidator) ValidateWithGrace(tokenStr string, grace time.Duration)
 	hash := TokenHash(tokenStr)
 	v.mu.Lock()
 	v.knownTokens[hash] = cs
+	v.persistKnown(hash, tokenStr, cs)
 	v.mu.Unlock()
 
 	return claims, nil
@@ -258,6 +340,7 @@ func (v *TokenValidator) validate(tokenStr string, _ bool) (*UCANClaims, error) 
 	hash := TokenHash(tokenStr)
 	v.mu.Lock()
 	v.knownTokens[hash] = cs
+	v.persistKnown(hash, tokenStr, cs)
 	v.mu.Unlock()
 
 	return claims, nil
@@ -271,6 +354,7 @@ func (v *TokenValidator) RegisterToken(tokenStr string, caps []Capability) {
 	hash := TokenHash(tokenStr)
 	v.mu.Lock()
 	v.knownTokens[hash] = cs
+	v.persistKnown(hash, tokenStr, cs)
 	v.mu.Unlock()
 }
 

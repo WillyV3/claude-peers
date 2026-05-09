@@ -177,6 +177,18 @@ func newBroker() (*Broker, error) {
 			name TEXT PRIMARY KEY,
 			first_seen TEXT NOT NULL
 		)`,
+		// known_tokens: durable cache of every token the validator has
+		// authenticated. Without this, the in-memory knownTokens map is wiped
+		// on every broker restart -- which silently breaks any
+		// delegated-from-peer-token chain until that peer re-authenticates.
+		// Capabilities is a JSON array of resource strings. Expired rows are
+		// pruned on startup (see restoreTokenChain) and periodically.
+		`CREATE TABLE IF NOT EXISTS known_tokens (
+			hash TEXT PRIMARY KEY,
+			capabilities TEXT NOT NULL,
+			expires_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_known_tokens_expires_at ON known_tokens(expires_at)`,
 	} {
 		db.Exec(stmt)
 	}
@@ -199,6 +211,11 @@ func newBroker() (*Broker, error) {
 		log.Printf("[broker] WARNING: no keypair found (%v) -- all requests will get 401", err)
 	} else {
 		b.validator = NewTokenValidator(kp.PublicKey)
+		// Restore previously-known tokens BEFORE attaching the persister so
+		// the restore reads don't loop back into write-throughs. After this,
+		// any RegisterToken / validate auto-persists for next restart.
+		b.validator.Restore(loadKnownTokens(db))
+		b.validator.WithPersister(&sqliteTokenPersister{db: db})
 		rootToken, err := loadBrokerRootToken(configDir())
 		if err != nil {
 			log.Printf("[broker] WARNING: no root token found (%v) -- all requests will get 401", err)
@@ -1059,4 +1076,66 @@ func runBroker(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// sqliteTokenPersister implements TokenPersister against the broker's
+// SQLite. Save is fire-and-forget (errors logged, not propagated) since
+// persistence is strictly additive -- the in-memory map is the source of
+// truth during this process lifetime; SQLite is purely for restart
+// recovery. UPSERT keeps the table flat (one row per hash).
+type sqliteTokenPersister struct {
+	db *sql.DB
+}
+
+func (p *sqliteTokenPersister) Save(hash string, capabilities []string, expiresAt time.Time) {
+	caps, err := json.Marshal(capabilities)
+	if err != nil {
+		log.Printf("[broker] persist token: marshal caps: %v", err)
+		return
+	}
+	_, err = p.db.Exec(
+		`INSERT INTO known_tokens (hash, capabilities, expires_at) VALUES (?, ?, ?)
+		 ON CONFLICT(hash) DO UPDATE SET
+		   capabilities = excluded.capabilities,
+		   expires_at = excluded.expires_at`,
+		hash, string(caps), expiresAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		log.Printf("[broker] persist token: db: %v", err)
+	}
+}
+
+// loadKnownTokens reads non-expired rows out of known_tokens and returns
+// them in the shape TokenValidator.Restore expects. Also opportunistically
+// prunes expired rows so the table doesn't grow without bound. Returns an
+// empty slice on any error (broker still functions, just without restart
+// recovery).
+func loadKnownTokens(db *sql.DB) []PersistedToken {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`DELETE FROM known_tokens WHERE expires_at < ?`, now); err != nil {
+		log.Printf("[broker] prune expired tokens: %v", err)
+	}
+
+	rows, err := db.Query(`SELECT hash, capabilities FROM known_tokens WHERE expires_at >= ?`, now)
+	if err != nil {
+		log.Printf("[broker] load known tokens: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var out []PersistedToken
+	for rows.Next() {
+		var hash, capsJSON string
+		if err := rows.Scan(&hash, &capsJSON); err != nil {
+			log.Printf("[broker] scan known token row: %v", err)
+			continue
+		}
+		var caps []string
+		if err := json.Unmarshal([]byte(capsJSON), &caps); err != nil {
+			log.Printf("[broker] unmarshal token caps: %v", err)
+			continue
+		}
+		out = append(out, PersistedToken{Hash: hash, Capabilities: caps})
+	}
+	return out
 }
