@@ -18,7 +18,17 @@ The broker itself speaks plain HTTP. It is meant to be reached over an encrypted
 - **Single-machine:** broker binds to `127.0.0.1` by default. Loopback traffic doesn't leave the host.
 - **Cloudflare Tunnel / reverse proxy (caddy/nginx):** TLS terminates at the proxy edge. The cloudflared-to-broker hop stays on localhost.
 
-**Do not expose the broker directly to the public internet without one of these.** No TLS = no transport privacy in that case. Native TLS support (autocert / Let's Encrypt) is planned for users who want a single-binary public deployment without a reverse proxy.
+**Do not expose the broker directly to the public internet without one of these.** No TLS = no transport privacy in that case.
+
+For single-binary public deployments without a reverse proxy, the broker has built-in Let's Encrypt support via [autocert](https://pkg.go.dev/golang.org/x/crypto/acme/autocert) (TLS-ALPN-01 challenge, no port 80 needed):
+
+```bash
+# DNS: broker.example.com -> this machine's public IP
+# Firewall: port 443 reachable
+claude-peers broker --tls-domain broker.example.com --tls-email you@example.com
+```
+
+The cert is issued on first request, cached in `~/.config/claude-peers/autocert/`, and auto-renewed before expiry. `HostPolicy` is locked to your configured domains so the broker won't burn rate limits issuing certs for unauthorized hostnames.
 
 **2. Authentication and authorization — UCAN tokens.**
 
@@ -129,7 +139,7 @@ Optionally add [NATS JetStream](https://nats.io/) for real-time event streaming 
 ```
 claude-peers init broker                   Set up broker (generates keys + token)
 claude-peers init client <broker-url>      Connect to a remote broker
-claude-peers broker                        Start the broker
+claude-peers broker [--tls-domain D]       Start the broker (add --tls-domain for autocert TLS)
 claude-peers server                        Start MCP server (used by Claude Code)
 claude-peers status                        Show broker status and peers
 claude-peers peers                         List all peers
@@ -167,6 +177,10 @@ Config: `~/.config/claude-peers/config.json`
 | `CLAUDE_PEERS_NATS` | NATS server URL (optional) |
 | `CLAUDE_PEERS_LLM_URL` | LLM endpoint for auto-summaries (optional) |
 | `CLAUDE_PEERS_DEFAULT_TTL` | Default child-token TTL (e.g. `30d`, default `24h`) |
+| `CLAUDE_PEERS_TLS_DOMAIN` | Comma-separated hostnames for Let's Encrypt (enables TLS) |
+| `CLAUDE_PEERS_TLS_EMAIL` | Account email for ACME renewal notices |
+| `CLAUDE_PEERS_TLS_CACHE_DIR` | Where autocert persists certs (default `~/.config/claude-peers/autocert`) |
+| `CLAUDE_PEERS_TLS_ACME_STAGING` | `1`/`true` to use Let's Encrypt staging for testing |
 
 ## Auth
 

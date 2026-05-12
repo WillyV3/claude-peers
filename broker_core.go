@@ -13,12 +13,73 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// parseBrokerFlags walks the args after `claude-peers broker` and applies
+// known --tls-* overrides to the global cfg. Unknown flags fail loud so a
+// typo doesn't silently disable TLS. Returns the first parse error.
+//
+// Flag forms supported: --flag value, --flag=value, --bool, --bool=true.
+// Kept hand-written rather than using flag.FlagSet because the rest of
+// the CLI uses the same manual style (see parseIssueTokenArgs).
+func parseBrokerFlags(args []string) error {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		var key, val string
+		var hasInline bool
+		if eq := strings.IndexByte(a, '='); eq > 0 {
+			key = a[:eq]
+			val = a[eq+1:]
+			hasInline = true
+		} else {
+			key = a
+		}
+		switch key {
+		case "--tls-domain":
+			if !hasInline {
+				if i+1 >= len(args) {
+					return fmt.Errorf("--tls-domain requires a value")
+				}
+				val = args[i+1]
+				i++
+			}
+			cfg.TLSDomain = val
+		case "--tls-email":
+			if !hasInline {
+				if i+1 >= len(args) {
+					return fmt.Errorf("--tls-email requires a value")
+				}
+				val = args[i+1]
+				i++
+			}
+			cfg.TLSEmail = val
+		case "--tls-cache-dir":
+			if !hasInline {
+				if i+1 >= len(args) {
+					return fmt.Errorf("--tls-cache-dir requires a value")
+				}
+				val = args[i+1]
+				i++
+			}
+			cfg.TLSCacheDir = val
+		case "--tls-acme-staging":
+			if hasInline {
+				cfg.TLSAcmeStaging = val == "true" || val == "1"
+			} else {
+				cfg.TLSAcmeStaging = true
+			}
+		default:
+			return fmt.Errorf("unknown flag %q for broker (supported: --tls-domain, --tls-email, --tls-cache-dir, --tls-acme-staging)", a)
+		}
+	}
+	return nil
+}
 
 // loadBrokerRootToken loads the root token for the broker, with migration support.
 // It prefers root-token.jwt over token.jwt.
@@ -1057,13 +1118,41 @@ func runBroker(ctx context.Context) error {
 		writeJSON(w, map[string]bool{"ok": true})
 	}))
 
+	handler := ucanMiddleware(b.validator)(mux)
+
+	// TLS path: when --tls-domain (or CLAUDE_PEERS_TLS_DOMAIN) is set,
+	// terminate Let's Encrypt TLS on port 443 via TLS-ALPN-01. The
+	// existing cfg.Listen value is ignored; autocert needs 443.
+	tlsCfg := tlsConfigFromGlobalConfig()
+	if tlsCfg.Enabled() {
+		m, err := newAutocertManager(tlsCfg)
+		if err != nil {
+			return fmt.Errorf("tls: %w", err)
+		}
+		srv := &http.Server{
+			Handler:   handler,
+			TLSConfig: m.TLSConfig(),
+		}
+		log.Printf("[claude-peers broker] listening on :443 TLS (domains=%v, db: %s, machine: %s)",
+			tlsCfg.Domains, cfg.DBPath, cfg.MachineName)
+		context.AfterFunc(ctx, func() {
+			srv.Shutdown(context.Background())
+		})
+		ln := m.Listener()
+		if err := srv.Serve(ln); err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+	}
+
+	// Plain HTTP path (default).
 	addr := cfg.Listen
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
 
-	srv := &http.Server{Handler: ucanMiddleware(b.validator)(mux)}
+	srv := &http.Server{Handler: handler}
 
 	log.Printf("[claude-peers broker] listening on %s (db: %s, machine: %s)", addr, cfg.DBPath, cfg.MachineName)
 
@@ -1076,6 +1165,26 @@ func runBroker(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// tlsConfigFromGlobalConfig translates the cfg.TLS* fields (which were
+// populated from config file, env vars, and CLI flags) into a TLSConfig.
+// Empty TLSDomain produces a zero-value (disabled) TLSConfig.
+func tlsConfigFromGlobalConfig() TLSConfig {
+	domains := parseTLSDomains(cfg.TLSDomain)
+	if len(domains) == 0 {
+		return TLSConfig{}
+	}
+	cacheDir := cfg.TLSCacheDir
+	if cacheDir == "" {
+		cacheDir = filepath.Join(configDir(), "autocert")
+	}
+	return TLSConfig{
+		Domains:     domains,
+		Email:       cfg.TLSEmail,
+		CacheDir:    cacheDir,
+		AcmeStaging: cfg.TLSAcmeStaging,
+	}
 }
 
 // sqliteTokenPersister implements TokenPersister against the broker's

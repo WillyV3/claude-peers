@@ -35,6 +35,10 @@ func main() {
 
 	switch os.Args[1] {
 	case "broker":
+		if err := parseBrokerFlags(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(2)
+		}
 		if err := runBroker(ctx); err != nil {
 			log.Fatal(err)
 		}

@@ -63,6 +63,25 @@ type Config struct {
 	// backward compatibility with pre-T3 installs. Set to "30d" or similar
 	// to stop the rotation treadmill for always-on peers.
 	DefaultChildTTL string `json:"default_child_ttl"`
+
+	// TLSDomain is a comma-separated list of hostnames for autocert to
+	// issue Let's Encrypt certs for. Empty = TLS disabled, broker speaks
+	// plain HTTP on cfg.Listen (the default; recommended for Tailscale /
+	// reverse-proxy deployments). Set to "broker.example.com" to enable
+	// public single-binary TLS via TLS-ALPN-01.
+	TLSDomain string `json:"tls_domain"`
+
+	// TLSEmail is the optional contact for Let's Encrypt renewal failures.
+	TLSEmail string `json:"tls_email"`
+
+	// TLSCacheDir is where autocert persists the issued cert and the
+	// ACME account key. Must be mode 0700. Defaults to <configDir>/autocert
+	// when TLSDomain is set and this is empty.
+	TLSCacheDir string `json:"tls_cache_dir"`
+
+	// TLSAcmeStaging routes ACME calls to Let's Encrypt staging instead
+	// of production. Use for testing deployments.
+	TLSAcmeStaging bool `json:"tls_acme_staging"`
 }
 
 // cfg is the global config, loaded once at startup.
@@ -113,6 +132,18 @@ func loadConfig() Config {
 	}
 	if v := os.Getenv("CLAUDE_PEERS_DEFAULT_TTL"); v != "" {
 		c.DefaultChildTTL = v
+	}
+	if v := os.Getenv("CLAUDE_PEERS_TLS_DOMAIN"); v != "" {
+		c.TLSDomain = v
+	}
+	if v := os.Getenv("CLAUDE_PEERS_TLS_EMAIL"); v != "" {
+		c.TLSEmail = v
+	}
+	if v := os.Getenv("CLAUDE_PEERS_TLS_CACHE_DIR"); v != "" {
+		c.TLSCacheDir = v
+	}
+	if v := os.Getenv("CLAUDE_PEERS_TLS_ACME_STAGING"); v == "1" || v == "true" {
+		c.TLSAcmeStaging = true
 	}
 
 	// Legacy env var
