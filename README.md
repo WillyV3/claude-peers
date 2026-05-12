@@ -6,6 +6,32 @@ Peer discovery and messaging between Claude Code sessions.
 
 Run multiple Claude Code instances on the same machine? They can now see each other, send messages, and share context -- automatically.
 
+## Security model
+
+claude-peers is designed for deployments where the broker and peers share a private network (Tailscale, WireGuard, VPN, or a single machine). The security guarantees rely on two layers:
+
+**1. Transport encryption — provided by your network layer.**
+
+The broker itself speaks plain HTTP. It is meant to be reached over an encrypted network underlay:
+
+- **Tailscale / WireGuard (recommended):** every byte between any two tailnet nodes is wrapped in WireGuard (Curve25519 key exchange, ChaCha20-Poly1305 AEAD, mutually authenticated by node keys). Stronger than typical TLS because both endpoints are cryptographically identified, not just the server.
+- **Single-machine:** broker binds to `127.0.0.1` by default. Loopback traffic doesn't leave the host.
+- **Cloudflare Tunnel / reverse proxy (caddy/nginx):** TLS terminates at the proxy edge. The cloudflared-to-broker hop stays on localhost.
+
+**Do not expose the broker directly to the public internet without one of these.** No TLS = no transport privacy in that case. Native TLS support (autocert / Let's Encrypt) is planned for users who want a single-binary public deployment without a reverse proxy.
+
+**2. Authentication and authorization — UCAN tokens.**
+
+Every request to the broker carries an Ed25519-signed JWT ([UCAN](https://ucan.xyz/), see [Auth](#auth) below). The broker validates the signature chain back to a root key generated at `init`. Tokens are capability-scoped, time-limited, and persisted across broker restarts (T12) so delegation chains survive process restarts without re-authentication.
+
+**What the broker does NOT secure:**
+
+- Token JWTs are signed but not encrypted; the network layer provides confidentiality. If you skip Tailscale/TLS, an on-path attacker on the same network can read tokens.
+- The broker trusts every peer that presents a valid token. There's no per-peer rate limit on messages within the token's capabilities (yet — see [#11](https://github.com/WillyV3/claude-peers-go/issues)).
+- No protection against malicious peers spamming the broker once they have a token. Token issuance is the trust boundary; only issue tokens to peers you control.
+
+If you're deploying claude-peers, the practical answer is: **put it behind Tailscale or a reverse proxy.** Both are zero-cost and well-trodden patterns for self-hosted Go services.
+
 ## What it does
 
 - Claude Code sessions automatically discover each other
